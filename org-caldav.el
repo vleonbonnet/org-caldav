@@ -1008,7 +1008,11 @@ If RESUME is non-nil, try to resume."
 		  (write-region "" nil filename)
 		(user-error "File %s does not exist" filename))))
 	  ;; prevent https://github.com/dengste/org-caldav/issues/230
-	  (org-id-update-id-locations files-for-sync)))
+	  ;; Only scan sync files rather than all agenda/open/known files,
+	  ;; to avoid a full org-id rescan on every sync cycle.
+	  (let ((org-id-extra-files nil)
+		(org-agenda-files nil))
+	    (org-id-update-id-locations files-for-sync))))
       ;; Check if we need to do OAuth2
       (when (org-caldav-use-oauth2)
 	;; We need to do oauth2. Check if it is available.
