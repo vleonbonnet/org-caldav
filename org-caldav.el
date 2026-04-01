@@ -426,9 +426,6 @@ and  action = {org->cal, cal->org, error:org->cal, error:cal->org}.")
 (defvar org-caldav-empty-calendar nil
   "Flag if we have an empty calendar in the beginning.")
 
-(defvar org-caldav--id-locations-scan-time nil
-  "Time of last `org-caldav--update-id-locations' scan.
-Used to skip rescanning files that have not changed.")
 
 (defvar org-caldav-ics-buffer nil
   "Buffer holding the ICS data.")
@@ -1020,9 +1017,7 @@ If RESUME is non-nil, try to resume."
 		  (write-region "" nil filename)
 		(user-error "File %s does not exist" filename))))
 	  ;; prevent https://github.com/dengste/org-caldav/issues/230
-	  ;; Only rescan when files have actually changed, inspired by
-	  ;; org-generic-id's modification-time approach.
-	  (org-caldav--update-id-locations files-for-sync)))
+	  (org-id-update-id-locations files-for-sync)))
       ;; Check if we need to do OAuth2
       (when (org-caldav-use-oauth2)
 	;; We need to do oauth2. Check if it is available.
@@ -1908,33 +1903,6 @@ Do nothing if LEVEL is larger than `org-caldav-debug-level'."
   "Return non-nil if current buffer is narrowed."
   (> (buffer-size) (- (point-max)
 		      (point-min))))
-
-(defun org-caldav--file-modified-since-p (file since)
-  "Return non-nil if FILE has been modified since time SINCE.
-Checks both the file on disk and any visiting buffer."
-  (or (null since)
-      (let ((buf (find-buffer-visiting file)))
-        (cond
-         ;; Buffer exists and has unsaved changes — always rescan.
-         ((and buf (buffer-modified-p buf)) t)
-         ;; Buffer exists, not modified — use its visited-file-modtime.
-         (buf (time-less-p since (visited-file-modtime buf)))
-         ;; No buffer — use filesystem modtime.
-         ((file-exists-p file)
-          (time-less-p since (file-attribute-modification-time
-                              (file-attributes file))))))))
-
-(defun org-caldav--update-id-locations (files)
-  "Update org-id locations, but only rescan files modified since last check.
-FILES is the list of sync files to consider."
-  (let ((modified (seq-filter
-                   (lambda (f)
-                     (org-caldav--file-modified-since-p
-                      f org-caldav--id-locations-scan-time))
-                   files)))
-    (when modified
-      (org-id-update-id-locations modified)
-      (setq org-caldav--id-locations-scan-time (current-time)))))
 
 (defun org-caldav--my-email ()
   "Return the current user's email for attendee matching.
