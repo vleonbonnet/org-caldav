@@ -41,6 +41,7 @@
 (require 'url-util)
 (require 'cl-lib)
 (require 'button)
+(require 'seq)
 
 (declare-function oauth2-url-retrieve-synchronously "ext:oauth2" (&rest args))
 (declare-function oauth2-auth-and-store "ext:oauth2" (&rest args))
@@ -389,6 +390,15 @@ the unit tests to fail otherwise."
 (defcustom org-caldav-description-blank-line-after t
   "Whether DESCRIPTION inserted into org should be followed by blank line."
   :type 'boolean)
+
+(defcustom org-caldav-my-email nil
+  "Email address of the current user for attendee matching.
+When set, org-caldav uses this to determine PARTICIPATION_TYPE
+and REPLY status from event attendee lists.
+When nil, org-caldav attempts to extract the email from
+`org-caldav-calendar-id'."
+  :type '(choice (const :tag "Auto-detect from calendar ID" nil)
+                 (string :tag "Email address")))
 
 ;; Internal variables
 (defvar org-caldav-oauth2-available
@@ -1877,6 +1887,63 @@ Do nothing if LEVEL is larger than `org-caldav-debug-level'."
   (> (buffer-size) (- (point-max)
 		      (point-min))))
 
+(defun org-caldav--my-email ()
+  "Return the current user's email for attendee matching.
+Uses `org-caldav-my-email' if set, otherwise tries to extract
+an email from `org-caldav-calendar-id'."
+  (or org-caldav-my-email
+      (when (and (stringp org-caldav-calendar-id)
+                 (string-match "\\`\\([^/]+@[^/]+\\)" org-caldav-calendar-id))
+        (match-string 1 org-caldav-calendar-id))))
+
+(defun org-caldav--extract-attendees (e)
+  "Extract attendee information from icalendar element E.
+Returns a plist with keys :organizer, :req-participants,
+:opt-participants, :my-role and :my-partstat."
+  (let* ((props (car (cddr e)))
+         (attendee-props (seq-filter
+                          (lambda (p) (eq (car p) 'ATTENDEE))
+                          props))
+         (organizer-raw (or (icalendar--get-event-property e 'ORGANIZER) ""))
+         (organizer (replace-regexp-in-string
+                     "^[Mm][Aa][Ii][Ll][Tt][Oo]:" ""
+                     organizer-raw))
+         (my-email (org-caldav--my-email))
+         my-role my-partstat req opt)
+    (dolist (att attendee-props)
+      (let* ((attrs (cadr att))
+             (value (car (cddr att)))
+             (cn (plist-get attrs 'CN))
+             (role (or (plist-get attrs 'ROLE) "REQ-PARTICIPANT"))
+             (partstat (plist-get attrs 'PARTSTAT))
+             (email (replace-regexp-in-string
+                     "^[Mm][Aa][Ii][Ll][Tt][Oo]:" "" (or value "")))
+             (name (or cn email)))
+        (when (and my-email
+                   (string-equal-ignore-case email my-email))
+          (setq my-role role
+                my-partstat partstat))
+        (if (string= role "OPT-PARTICIPANT")
+            (push name opt)
+          (push name req))))
+    (list :organizer organizer
+          :req-participants (nreverse req)
+          :opt-participants (nreverse opt)
+          :my-role my-role
+          :my-partstat my-partstat)))
+
+(defun org-caldav--format-participant-list (participants)
+  "Format list of PARTICIPANTS as a comma-separated string."
+  (mapconcat #'identity participants ", "))
+
+(defun org-caldav--partstat-to-reply (partstat)
+  "Convert iCalendar PARTSTAT value to a human-readable reply string."
+  (pcase partstat
+    ("ACCEPTED"     "Accepted")
+    ("DECLINED"     "Declined")
+    ("TENTATIVE"    "Tentative")
+    (_              "Not replied yet")))
+
 (defun org-caldav--insert-description (description)
   (when (> (length description) 0)
     (when org-caldav-description-blank-line-before (newline))
@@ -1931,6 +1998,25 @@ Returns MD5 from entry."
       (when .uid
         (org-set-property "ID" (url-unhex-string .uid)))
       (org-caldav-change-location .location)
+      (when .attendee-data
+        (let ((att .attendee-data))
+          (org-set-property "ICAL_EVENT" "t")
+          (org-set-property "ORGANIZER" (or (plist-get att :organizer) ""))
+          (org-set-property "REQ_PARTICIPANTS"
+                            (org-caldav--format-participant-list
+                             (plist-get att :req-participants)))
+          (org-set-property "OPT_PARTICIPANTS"
+                            (org-caldav--format-participant-list
+                             (plist-get att :opt-participants)))
+          (org-set-property "RRULE" (or .rrule ""))
+          (org-set-property "PARTICIPATION_TYPE"
+                            (pcase (plist-get att :my-role)
+                              ("OPT-PARTICIPANT" "optional")
+                              ("REQ-PARTICIPANT" "required")
+                              (_ "required")))
+          (org-set-property "REPLY"
+                            (org-caldav--partstat-to-reply
+                             (plist-get att :my-partstat)))))
       (org-caldav-insert-org-entry--wrapup .categories))))
 
 (defun org-caldav--org-set-tags-to (tags)
@@ -2265,6 +2351,8 @@ which can be fed into `org-caldav-insert-org-event-or-todo'."
 			         "")))
             (rrule-props . ,(icalendar--split-value
                              (icalendar--get-event-property e 'RRULE)))
+            (rrule . ,(or (icalendar--get-event-property e 'RRULE) ""))
+            (attendee-data . ,(org-caldav--extract-attendees e))
             (categories . ,(org-caldav--tags-str-to-list
                             (icalendar--convert-string-for-import
                              (or (icalendar--get-event-property e 'CATEGORIES)
