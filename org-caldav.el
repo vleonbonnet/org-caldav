@@ -426,6 +426,10 @@ and  action = {org->cal, cal->org, error:org->cal, error:cal->org}.")
 (defvar org-caldav-empty-calendar nil
   "Flag if we have an empty calendar in the beginning.")
 
+(defvar org-caldav--id-locations-scan-time nil
+  "Time of last `org-caldav--update-id-locations' scan.
+Used to skip rescanning files that have not changed.")
+
 (defvar org-caldav-ics-buffer nil
   "Buffer holding the ICS data.")
 
@@ -732,34 +736,42 @@ If retrieve fails, do `org-caldav-retry-attempts' retries."
 	  (org-caldav-url-retrieve-synchronously
 	   (concat (org-caldav-events-url) (url-hexify-string uid) org-caldav-uuid-extension))
 	(goto-char (point-min))
-	(if (looking-at "HTTP.*2[0-9][0-9]")
-	    (setq eventbuffer (current-buffer))
-	  ;; There was an error retrieving the event
+	(cond
+	 ((looking-at "HTTP.*2[0-9][0-9]")
+	  (setq eventbuffer (current-buffer)))
+	 ((looking-at "HTTP.*404")
+	  ;; Event does not exist on server — return nil.
+	  (org-caldav-debug-print
+	   1 (format "Event UID %s not found on server (404)." uid))
+	  (setq counter org-caldav-retry-attempts))
+	 (t
+	  ;; Other HTTP error — retry.
 	  (setq errormessage (buffer-substring (point-min) (line-end-position)))
 	  (setq counter (1+ counter))
 	  (org-caldav-debug-print
 	   1 (format "(Try %d) Error when trying to retrieve UID %s: %s"
-		     counter uid errormessage)))))
-    (unless eventbuffer
-      ;; Give up
+		     counter uid errormessage))))))
+    (unless (or eventbuffer (null errormessage))
+      ;; Give up on non-404 errors.
       (error "Failed to retrieve UID %s after %d tries with error %s"
 	     uid org-caldav-retry-attempts errormessage))
-    (with-current-buffer eventbuffer
-      (unless (search-forward "BEGIN:VCALENDAR" nil t)
-	(error "Failed to find calendar entry for UID %s (see buffer %s)"
-	       uid (buffer-name eventbuffer)))
-      (beginning-of-line)
-      (unless with-headers
-	(delete-region (point-min) (point)))
-      (save-excursion
-	(while (re-search-forward "\^M" nil t)
-	  (replace-match "")))
-      ;; Join lines because of bug in icalendar parsing.
-      (save-excursion
-	(while (re-search-forward "^ " nil t)
-	  (delete-char -2)))
-      (org-caldav-debug-print 2 (format "Content of event UID %s: " uid)
-			      (buffer-string)))
+    (when eventbuffer
+      (with-current-buffer eventbuffer
+        (unless (search-forward "BEGIN:VCALENDAR" nil t)
+	  (error "Failed to find calendar entry for UID %s (see buffer %s)"
+	         uid (buffer-name eventbuffer)))
+        (beginning-of-line)
+        (unless with-headers
+	  (delete-region (point-min) (point)))
+        (save-excursion
+	  (while (re-search-forward "\^M" nil t)
+	    (replace-match "")))
+        ;; Join lines because of bug in icalendar parsing.
+        (save-excursion
+	  (while (re-search-forward "^ " nil t)
+	    (delete-char -2)))
+        (org-caldav-debug-print 2 (format "Content of event UID %s: " uid)
+			        (buffer-string))))
     eventbuffer))
 
 (defun org-caldav-convert-buffer-to-crlf ()
@@ -1008,11 +1020,9 @@ If RESUME is non-nil, try to resume."
 		  (write-region "" nil filename)
 		(user-error "File %s does not exist" filename))))
 	  ;; prevent https://github.com/dengste/org-caldav/issues/230
-	  ;; Only scan sync files rather than all agenda/open/known files,
-	  ;; to avoid a full org-id rescan on every sync cycle.
-	  (let ((org-id-extra-files nil)
-		(org-agenda-files nil))
-	    (org-id-update-id-locations files-for-sync))))
+	  ;; Only rescan when files have actually changed, inspired by
+	  ;; org-generic-id's modification-time approach.
+	  (org-caldav--update-id-locations files-for-sync)))
       ;; Check if we need to do OAuth2
       (when (org-caldav-use-oauth2)
 	;; We need to do oauth2. Check if it is available.
@@ -1460,7 +1470,15 @@ level to add a new child entry."
 	(setq uid (car cur))
 	(setq counter (1+ counter))
 	(message "Getting event %d of %d" counter (length events))
-	(with-current-buffer (org-caldav-get-event uid)
+	(let ((event-buf (org-caldav-get-event uid)))
+	(unless event-buf
+	  ;; Event was deleted from server — skip it.
+	  (message "Event UID %s no longer exists on server, skipping." uid)
+	  (org-caldav-event-set-status cur 'deleted-in-cal)
+	  (push (list org-caldav-calendar-id uid 'deleted-in-cal 'removed-from-cal)
+		org-caldav-sync-result)
+	  (throw 'next nil))
+	(with-current-buffer event-buf
 	  ;; Get sequence number
 	  (goto-char (point-min))
           (setq is-todo (when (save-excursion (re-search-forward
@@ -1474,7 +1492,7 @@ level to add a new child entry."
 	    (when (re-search-forward "^SEQUENCE:\\s-*\\([0-9]+\\)" nil t)
 	      (org-caldav-event-set-sequence
 	       cur (string-to-number (match-string 1)))))
-	  (setq eventdata-alist (org-caldav-convert-event-or-todo--from-buffer is-todo)))
+	  (setq eventdata-alist (org-caldav-convert-event-or-todo--from-buffer is-todo))))
 	(cond
 	 ((eq (org-caldav-event-status cur) 'new-in-cal)
 	  ;; This is a new event.
@@ -1890,6 +1908,33 @@ Do nothing if LEVEL is larger than `org-caldav-debug-level'."
   "Return non-nil if current buffer is narrowed."
   (> (buffer-size) (- (point-max)
 		      (point-min))))
+
+(defun org-caldav--file-modified-since-p (file since)
+  "Return non-nil if FILE has been modified since time SINCE.
+Checks both the file on disk and any visiting buffer."
+  (or (null since)
+      (let ((buf (find-buffer-visiting file)))
+        (cond
+         ;; Buffer exists and has unsaved changes — always rescan.
+         ((and buf (buffer-modified-p buf)) t)
+         ;; Buffer exists, not modified — use its visited-file-modtime.
+         (buf (time-less-p since (visited-file-modtime buf)))
+         ;; No buffer — use filesystem modtime.
+         ((file-exists-p file)
+          (time-less-p since (file-attribute-modification-time
+                              (file-attributes file))))))))
+
+(defun org-caldav--update-id-locations (files)
+  "Update org-id locations, but only rescan files modified since last check.
+FILES is the list of sync files to consider."
+  (let ((modified (seq-filter
+                   (lambda (f)
+                     (org-caldav--file-modified-since-p
+                      f org-caldav--id-locations-scan-time))
+                   files)))
+    (when modified
+      (org-id-update-id-locations modified)
+      (setq org-caldav--id-locations-scan-time (current-time)))))
 
 (defun org-caldav--my-email ()
   "Return the current user's email for attendee matching.
