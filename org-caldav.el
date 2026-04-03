@@ -1163,7 +1163,7 @@ If RESUME is non-nil, try to resume."
 		  (write-region "" nil filename)
 		(user-error "File %s does not exist" filename))))
 	  ;; prevent https://github.com/dengste/org-caldav/issues/230
-	  (org-id-update-id-locations files-for-sync)))
+	  (org-id-update-id-locations files-for-sync t)))
       ;; Check if we need to do OAuth2
       (when (org-caldav-use-oauth2)
 	;; We need to do oauth2. Check if it is available.
@@ -1384,9 +1384,12 @@ ICSBUF is the buffer containing the exported iCalendar file."
 		    (y-or-n-p (format "Delete event '%s' from external calendar?"
 				       (org-caldav-get-calendar-summary-from-uid
 					(car cur)))))
-	    (message "Deleting event %d of %d from calendar: %s"
-		     counter (length events)
-		     (org-caldav-get-calendar-summary-from-uid (car cur)))
+	    (let ((summary (org-caldav-get-calendar-summary-from-uid (car cur))))
+	      (message "Deleting event %d of %d from calendar: %s"
+		       counter (length events)
+		       (if (string-empty-p summary)
+			   (org-caldav-get-heading-from-uid (car cur))
+			 summary)))
 	    (org-caldav-delete-event (car cur))
 	    (push (list org-caldav-calendar-id (car cur)
 			'deleted-in-org 'removed-from-cal)
@@ -1852,25 +1855,27 @@ which can only be synced to calendar. Ignoring." uid))
   (unless (eq org-caldav-delete-org-entries 'never)
     (dolist (cur (org-caldav-filter-events 'deleted-in-cal))
       (org-id-goto (car cur))
-      (when (or (eq org-caldav-delete-org-entries 'always)
-		(and (eq org-caldav-delete-org-entries 'ask)
-		     (y-or-n-p (format "Delete '%s' locally? "
-				       (or (org-entry-get (point) "ITEM") (car cur))))))
-	(delete-region (org-entry-beginning-position)
-		       (org-entry-end-position))
+      (let ((heading (or (org-entry-get (point) "ITEM") (car cur))))
+	(when (or (eq org-caldav-delete-org-entries 'always)
+		  (and (eq org-caldav-delete-org-entries 'ask)
+		       (y-or-n-p (format "Delete '%s' locally? " heading))))
+	  (message "Deleting from org: %s" heading)
+	  (delete-region (org-entry-beginning-position)
+			 (org-entry-end-position))
 	(setq org-caldav-event-list
 	      (delete cur org-caldav-event-list))
 	(org-caldav-debug-print 1
 	 (format "Event UID %s: Deleted from Org" (car cur)))
 	(push (list org-caldav-calendar-id (car cur)
 		    'deleted-in-cal 'removed-from-org)
-	      org-caldav-sync-result))))
+	      org-caldav-sync-result)))))
   ;; Save the inbox file once at the end.
   (when org-caldav-save-buffers
     (let ((inbox-buf (org-find-base-buffer-visiting
                       (org-caldav-inbox-file org-caldav-inbox))))
       (when (and inbox-buf (buffer-modified-p inbox-buf))
-        (with-current-buffer inbox-buf (save-buffer))))))
+        (with-current-buffer inbox-buf
+          (let ((inhibit-message t)) (save-buffer)))))))
 
 (defun org-caldav-push-reply-changes ()
   "Scan events for REPLY property changes and push them to CalDAV.
@@ -2047,7 +2052,8 @@ NEWLOCATION contains newlines, replace them with
           (org-set-property "OLDID" uid)
           (let ((inhibit-message t))
             (org-delete-property "ID"))))
-      (write-region (point-min) (point-max) org-caldav-backup-file t))))
+      (let ((inhibit-message t))
+	(write-region (point-min) (point-max) org-caldav-backup-file t)))))
 
 (defun org-caldav-skip-function (backend)
   (org-caldav-debug-print 2 "Skipping over excluded entries")
@@ -2558,8 +2564,9 @@ See also `org-caldav-save-directory'."
 	            (prin1-to-string org-caldav-files))
       ")\n")
     ;; Save it.
-    (write-region (point-min) (point-max)
-		  (org-caldav-sync-state-filename org-caldav-calendar-id))))
+    (let ((inhibit-message t))
+      (write-region (point-min) (point-max)
+		    (org-caldav-sync-state-filename org-caldav-calendar-id)))))
 
 (defun org-caldav-load-sync-state ()
   "Load org-caldav sync database from disk."
