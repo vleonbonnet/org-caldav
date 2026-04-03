@@ -1823,7 +1823,7 @@ which can only be synced to calendar. Ignoring." uid))
 			  (if (eq timesync 'orgsexp)
 			      'error:changed-orgsexp 'cal->org))
 		    org-caldav-sync-result)
-              (when org-caldav-save-buffers (save-buffer))))))
+              )))))
 	;; Update the event database.
 	(org-caldav-event-set-status cur 'synced)
 	;; Store imported reply in sync state.
@@ -1836,7 +1836,7 @@ which can only be synced to calendar. Ignoring." uid))
 	  (org-caldav-event-set-md5
 	   cur (md5 (buffer-substring-no-properties
 		     (org-entry-beginning-position)
-		     (org-entry-end-position))))))))
+		     (org-entry-end-position)))))))
   ;; (Maybe) delete entries which were deleted in calendar.
   (unless (eq org-caldav-delete-org-entries 'never)
     (dolist (cur (org-caldav-filter-events 'deleted-in-cal))
@@ -1847,14 +1847,19 @@ which can only be synced to calendar. Ignoring." uid))
 				       (or (org-entry-get (point) "ITEM") (car cur))))))
 	(delete-region (org-entry-beginning-position)
 		       (org-entry-end-position))
-        (when org-caldav-save-buffers (save-buffer))
 	(setq org-caldav-event-list
 	      (delete cur org-caldav-event-list))
 	(org-caldav-debug-print 1
 	 (format "Event UID %s: Deleted from Org" (car cur)))
 	(push (list org-caldav-calendar-id (car cur)
 		    'deleted-in-cal 'removed-from-org)
-	      org-caldav-sync-result)))))
+	      org-caldav-sync-result))))
+  ;; Save the inbox file once at the end.
+  (when org-caldav-save-buffers
+    (let ((inbox-buf (org-find-base-buffer-visiting
+                      (org-caldav-inbox-file org-caldav-inbox))))
+      (when (and inbox-buf (buffer-modified-p inbox-buf))
+        (with-current-buffer inbox-buf (save-buffer))))))
 
 (defun org-caldav-push-reply-changes ()
   "Scan events for REPLY property changes and push them to CalDAV.
@@ -1901,38 +1906,50 @@ pipeline from re-exporting the event."
 		     org-reply
 		     (not (string= org-reply stored-reply))
 		     (org-caldav--reply-to-partstat org-reply))
-	    (message "Pushing REPLY change for '%s': %s -> %s"
-		     (or summary uid) stored-reply org-reply)
-	    (org-caldav-debug-print
-	     1 (format "UID %s (%s): REPLY changed '%s' -> '%s', pushing."
-		       uid (or summary "?") stored-reply org-reply))
-	    (condition-case err
-		(if (org-caldav-push-reply uid org-reply)
-		    (progn
-		      (org-caldav-event-set-reply cur org-reply)
-		      (push uid events-pushed)
-		      (push (list org-caldav-calendar-id uid
-				  'reply-pushed 'org->cal)
-			    org-caldav-sync-result)
-		      (message "REPLY push succeeded for '%s'."
+	    ;; Check if org is stale: "Not replied yet" is the default
+	    ;; import value which sync-changes-to-org doesn't update.
+	    ;; The stored reply reflects the last known server state.
+	    (if (string= org-reply "Not replied yet")
+		;; Org is stale — update it to match stored, don't push.
+		(progn
+		  (org-caldav-debug-print
+		   1 (format "UID %s (%s): Org REPLY stale ('%s'), updating to '%s'."
+			     uid (or summary "?") org-reply stored-reply))
+		  (when marker
+		    (org-entry-put marker "REPLY" stored-reply)))
+		;; Org reply genuinely changed — push to server.
+		(message "Pushing REPLY change for '%s': %s -> %s"
+			 (or summary uid) stored-reply org-reply)
+		(org-caldav-debug-print
+		 1 (format "UID %s (%s): REPLY changed '%s' -> '%s', pushing."
+			   uid (or summary "?") stored-reply org-reply))
+		(condition-case err
+		    (if (org-caldav-push-reply uid org-reply)
+			(progn
+			  (org-caldav-event-set-reply cur org-reply)
+			  (push uid events-pushed)
+			  (push (list org-caldav-calendar-id uid
+				      'reply-pushed 'org->cal)
+				org-caldav-sync-result)
+			  (message "REPLY push succeeded for '%s'."
+				   (or summary uid))
+			  (org-caldav-debug-print
+			   1 (format "UID %s: REPLY push succeeded." uid)))
+		      (message "REPLY push FAILED for '%s'."
 			       (or summary uid))
 		      (org-caldav-debug-print
-		       1 (format "UID %s: REPLY push succeeded." uid)))
-		  (message "REPLY push FAILED for '%s'."
-			   (or summary uid))
-		  (org-caldav-debug-print
-		   1 (format "UID %s: REPLY push FAILED." uid))
-		  (push (list org-caldav-calendar-id uid
-			      'reply-pushed 'error:reply-push)
-			org-caldav-sync-result))
-	      (error
-	       (message "REPLY push error for '%s': %s"
-			(or summary uid) err)
-	       (org-caldav-debug-print
-		1 (format "UID %s: REPLY push error: %s" uid err))
-	       (push (list org-caldav-calendar-id uid
-			   'reply-pushed 'error:reply-push)
-		     org-caldav-sync-result)))))))
+		       1 (format "UID %s: REPLY push FAILED." uid))
+		      (push (list org-caldav-calendar-id uid
+				  'reply-pushed 'error:reply-push)
+			    org-caldav-sync-result))
+		  (error
+		   (message "REPLY push error for '%s': %s"
+			    (or summary uid) err)
+		   (org-caldav-debug-print
+		    1 (format "UID %s: REPLY push error: %s" uid err))
+		   (push (list org-caldav-calendar-id uid
+			       'reply-pushed 'error:reply-push)
+			 org-caldav-sync-result))))))))
     ;; Refresh etags and MD5 for pushed events to prevent
     ;; the Org->Cal pipeline from re-exporting them.
     (when events-pushed
@@ -2000,7 +2017,8 @@ NEWLOCATION contains newlines, replace them with
     (if (> (length newlocation) 0)
 	(org-set-property "LOCATION"
 			  (replace-regexp-in-string "\n" replacement newlocation))
-      (org-delete-property "LOCATION"))))
+      (let ((inhibit-message t))
+	(org-delete-property "LOCATION")))))
 
 (defun org-caldav-backup-item ()
   "Put current item in backup file."
@@ -2016,7 +2034,8 @@ NEWLOCATION contains newlines, replace them with
              (uid (org-element-property :ID entry)))
         (when uid
           (org-set-property "OLDID" uid)
-          (org-delete-property "ID")))
+          (let ((inhibit-message t))
+            (org-delete-property "ID"))))
       (write-region (point-min) (point-max) org-caldav-backup-file t))))
 
 (defun org-caldav-skip-function (backend)
@@ -2854,7 +2873,6 @@ existing ID.  This behavior may change in future."
                 (goto-char point)
                 (org-caldav-insert-org-event-or-todo
                  (append event `((uid . nil) (level . ,level))))
-                (when org-caldav-save-buffers (save-buffer))
                 (org-caldav-debug-print
                  1 (format "Added %d entries to %s"
                            nevents (org-caldav-inbox-file inbox)))))))
