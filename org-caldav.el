@@ -426,6 +426,9 @@ and  action = {org->cal, cal->org, error:org->cal, error:cal->org}.")
 (defvar org-caldav-empty-calendar nil
   "Flag if we have an empty calendar in the beginning.")
 
+(defvar org-caldav--connection-verified nil
+  "Non-nil after the first successful connection check in this session.")
+
 
 (defvar org-caldav-ics-buffer nil
   "Buffer holding the ICS data.")
@@ -606,7 +609,8 @@ This will switch to OAuth2 if necessary."
        extra-headers)
     (let ((url-request-method request-method)
 	  (url-request-data request-data)
-	  (url-request-extra-headers extra-headers))
+	  (url-request-extra-headers extra-headers)
+	  (url-show-status nil))
       (url-retrieve-synchronously url))))
 
 (defun org-caldav-namespace-bug-workaround (buffer)
@@ -1166,19 +1170,21 @@ If RESUME is non-nil, try to resume."
 	(org-caldav-check-oauth2 org-caldav-url)
 	;; Retrieve token
 	(org-caldav-retrieve-oauth2-token org-caldav-url org-caldav-calendar-id))
-      (let ((numretry 0)
-	    success)
-	(while (null success)
-	  (condition-case err
-	      (progn
-		(org-caldav-check-connection)
-		(setq success t))
-	    (error
-	     (if (= numretry (1- org-caldav-retry-attempts))
-		 (org-caldav-check-connection)
-	       (org-caldav-debug-print
-		1 "Got error while checking connection (will try again):" err)
-	       (cl-incf numretry))))))
+      (unless org-caldav--connection-verified
+	(let ((numretry 0)
+	      success)
+	  (while (null success)
+	    (condition-case err
+		(progn
+		  (org-caldav-check-connection)
+		  (setq success t)
+		  (setq org-caldav--connection-verified t))
+	      (error
+	       (if (= numretry (1- org-caldav-retry-attempts))
+		   (org-caldav-check-connection)
+		 (org-caldav-debug-print
+		  1 "Got error while checking connection (will try again):" err)
+		 (cl-incf numretry)))))))
       (unless resume
 	(setq org-caldav-event-list nil
 	      org-caldav-previous-files nil)
@@ -1254,6 +1260,11 @@ Should I try to resume? "))))
 	(org-caldav-sync-calendar calendar))))
   (when org-caldav-show-sync-results
     (org-caldav-display-sync-results))
+  ;; Clean up dead url.el connection buffers.
+  (dolist (buf (buffer-list))
+    (when (and (string-match "\\` \\*http " (buffer-name buf))
+	       (not (get-buffer-process buf)))
+      (kill-buffer buf)))
   (message "%s" (org-caldav-sync-summary)))
 
 (defun org-caldav-sync-summary ()
@@ -2149,21 +2160,41 @@ Returns buffer containing the ICS file."
           (save-buffer))))
     ;; check scheduled and deadline for having both time or none (vtodo)
     (org-caldav-prepare-scheduled-deadline-timestamps orgfiles)
-    (set icalendar-file (make-temp-file "org-caldav-"))
-    (org-caldav-debug-print 1 (format "Generating ICS file %s."
-				      (symbol-value icalendar-file)))
+    (org-caldav-debug-print 1 "Generating ICS buffer.")
     ;; compat: use org-export-before-parsing-functions after org >=9.6
     (org-caldav--suppress-obsolete-warning org-export-before-parsing-hook
-      (let ((org-export-before-parsing-hook
+      (let ((inhibit-message t)
+            (org-export-before-parsing-hook
 	     (append org-export-before-parsing-hook
                      (when (or org-caldav-skip-conditions
                                org-caldav-days-in-past)
                        '(org-caldav-skip-function))
                      (when org-caldav-todo-deadline-schedule-warning-days
-                       '(org-caldav-scheduled-from-deadline)))))
-        ;; Export events to one single ICS file.
-        (apply 'org-icalendar--combine-files orgfiles)))
-    (find-file-noselect (symbol-value icalendar-file))))
+                       '(org-caldav-scheduled-from-deadline))))
+	    (org-agenda-new-buffers nil))
+	(unwind-protect
+	    (let ((ics-string
+		   (org-icalendar--vcalendar
+		    org-icalendar-combined-name
+		    user-full-name
+		    (or (org-string-nw-p org-icalendar-timezone)
+			(format-time-string "%Z"))
+		    org-icalendar-combined-description
+		    org-icalendar-ttl
+		    (mapconcat
+		     (lambda (file)
+		       (catch 'nextfile
+			 (org-check-agenda-file file)
+			 (with-current-buffer (org-get-agenda-file-buffer file)
+			   (org-export-as
+			    'icalendar nil nil t
+			    '(:ascii-charset utf-8 :ascii-links-to-notes nil)))))
+		     orgfiles ""))))
+	      (with-current-buffer (get-buffer-create " *org-caldav-ics*")
+		(erase-buffer)
+		(insert ics-string)
+		(current-buffer)))
+	  (org-release-buffers org-agenda-new-buffers))))))
 
 (defun org-caldav-get-uid ()
   "Get UID for event in current buffer."
