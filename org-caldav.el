@@ -445,11 +445,11 @@ To be removed when emacs dependency reaches >=27.1."
          ,body)
     `(with-no-warnings ,body)))
 
-(defsubst org-caldav-add-event (uid md5 etag sequence status)
-  "Add event with UID, MD5, ETAG and STATUS."
+(defsubst org-caldav-add-event (uid md5 etag sequence status &optional reply)
+  "Add event with UID, MD5, ETAG, SEQUENCE, STATUS and optionally REPLY."
   (setq org-caldav-event-list
 	(append org-caldav-event-list
-		(list (list uid md5 etag sequence status)))))
+		(list (list uid md5 etag sequence status reply)))))
 
 (defsubst org-caldav-search-event (uid)
   "Return entry with UID from even list."
@@ -473,7 +473,7 @@ To be removed when emacs dependency reaches >=27.1."
 
 (defsubst org-caldav-event-set-status (event status)
   "Set status from EVENT to STATUS."
-  (setcar (last event) status))
+  (setcar (nthcdr 4 event) status))
 
 (defsubst org-caldav-event-set-etag (event etag)
   "Set etag from EVENT to ETAG."
@@ -486,6 +486,17 @@ To be removed when emacs dependency reaches >=27.1."
 (defsubst org-caldav-event-set-sequence (event seqnum)
   "Set sequence number from EVENT to SEQNUM."
   (setcar (nthcdr 3 event) seqnum))
+
+(defsubst org-caldav-event-reply (event)
+  "Get reply from EVENT."
+  (nth 5 event))
+
+(defsubst org-caldav-event-set-reply (event reply)
+  "Set reply from EVENT to REPLY."
+  (if (nthcdr 5 event)
+      (setcar (nthcdr 5 event) reply)
+    ;; Backward compat: extend old 5-element tuples.
+    (nconc event (list reply))))
 
 (defsubst org-caldav-use-oauth2 ()
   (symbolp org-caldav-url))
@@ -799,6 +810,130 @@ The filename will be derived from the UID."
 	 (concat (org-caldav-events-url) uid org-caldav-uuid-extension)
 	 (encode-coding-string (buffer-string) 'utf-8))))))
 
+(defun org-caldav-push-reply (uid new-reply)
+  "Push REPLY change for event UID to CalDAV server.
+NEW-REPLY is a human-readable string like \"Accepted\".
+Returns non-nil on success."
+  (catch 'exit
+    (let ((new-partstat (org-caldav--reply-to-partstat new-reply))
+	  (my-email (org-caldav--my-email)))
+      (unless new-partstat
+	(org-caldav-debug-print
+	 1 (format "UID %s: Cannot push reply '%s' (no valid PARTSTAT)."
+		   uid new-reply))
+	(throw 'exit nil))
+      (unless my-email
+	(org-caldav-debug-print
+	 1 (format "UID %s: Cannot push reply (no email configured)." uid))
+	(throw 'exit nil))
+      (org-caldav-debug-print
+       1 (format "UID %s: Fetching event from server (email=%s)."
+		 uid my-email))
+      (let ((event-buf (org-caldav-get-event uid)))
+	(unless event-buf
+	  (org-caldav-debug-print
+	   1 (format "UID %s: Cannot push reply (event not on server)." uid))
+	  (throw 'exit nil))
+	(unwind-protect
+	    (with-current-buffer event-buf
+	      (org-caldav-debug-print
+	       2 (format "UID %s: Fetched event content:" uid)
+	       (buffer-string))
+	      ;; Find and update the user's ATTENDEE PARTSTAT.
+	      (goto-char (point-min))
+	      (let ((found nil)
+		    (email-re (concat "mailto:" (regexp-quote my-email))))
+		(org-caldav-debug-print
+		 1 (format "UID %s: Searching for ATTENDEE with %s"
+			   uid email-re))
+		(while (re-search-forward "^ATTENDEE" nil t)
+		  (let ((line-start (line-beginning-position))
+			(line-end (line-end-position)))
+		    (org-caldav-debug-print
+		     2 (format "UID %s: Found ATTENDEE line: %s"
+			       uid (buffer-substring line-start line-end)))
+		    (when (save-excursion
+			    (goto-char line-start)
+			    (re-search-forward email-re line-end t))
+		      (org-caldav-debug-print
+		       1 (format "UID %s: Matched user's ATTENDEE line." uid))
+		      (goto-char line-start)
+		      (if (re-search-forward
+			   "PARTSTAT=[^;:\r\n]*" line-end t)
+			  (progn
+			    (org-caldav-debug-print
+			     1 (format "UID %s: Replacing %s with PARTSTAT=%s"
+				       uid (match-string 0) new-partstat))
+			    (replace-match (concat "PARTSTAT=" new-partstat)))
+			;; No PARTSTAT yet; insert before the colon.
+			(goto-char line-start)
+			(when (re-search-forward ":mailto:" line-end t)
+			  (goto-char (match-beginning 0))
+			  (org-caldav-debug-print
+			   1 (format "UID %s: Inserting PARTSTAT=%s (none existed)"
+				     uid new-partstat))
+			  (insert ";PARTSTAT=" new-partstat)))
+		      (setq found t))))
+		(unless found
+		  (org-caldav-debug-print
+		   1 (format "UID %s: No ATTENDEE line for %s." uid my-email))
+		  (throw 'exit nil)))
+	      ;; Increment SEQUENCE number.
+	      (goto-char (point-min))
+	      (if (re-search-forward
+		   "^SEQUENCE:\\s-*\\([0-9]+\\)" nil t)
+		  (let ((old-seq (match-string 1))
+			(new-seq (number-to-string
+				  (1+ (string-to-number (match-string 1))))))
+		    (org-caldav-debug-print
+		     1 (format "UID %s: SEQUENCE %s -> %s" uid old-seq new-seq))
+		    (replace-match new-seq nil nil nil 1))
+		(goto-char (point-min))
+		(when (re-search-forward "^SUMMARY:" nil t)
+		  (forward-line)
+		  (org-caldav-debug-print
+		   1 (format "UID %s: Inserting SEQUENCE:1 (none existed)" uid))
+		  (insert "SEQUENCE:1\n")))
+	      ;; PUT the modified event directly (buffer has full VCALENDAR).
+	      (org-caldav-debug-print
+	       1 (format "UID %s: PUTting modified event to %s%s%s"
+			 uid (org-caldav-events-url)
+			 (url-hexify-string uid) org-caldav-uuid-extension))
+	      (org-caldav-debug-print
+	       2 (format "UID %s: Modified event content:" uid)
+	       (buffer-string))
+	      (org-caldav-save-resource
+	       (concat (org-caldav-events-url)
+		       (url-hexify-string uid) org-caldav-uuid-extension)
+	       (encode-coding-string (buffer-string) 'utf-8)))
+	  (kill-buffer event-buf))))))
+
+(defun org-caldav-get-server-reply (uid)
+  "Fetch event UID from server and return its PARTSTAT as a reply string.
+Returns a human-readable reply string, or nil if not found."
+  (let ((event-buf (org-caldav-get-event uid))
+	(my-email (org-caldav--my-email)))
+    (when (and event-buf my-email)
+      (unwind-protect
+	  (with-current-buffer event-buf
+	    (goto-char (point-min))
+	    (let ((email-re (concat "mailto:" (regexp-quote my-email))))
+	      (catch 'found
+		(while (re-search-forward "^ATTENDEE" nil t)
+		  (let ((line-start (line-beginning-position))
+			(line-end (line-end-position)))
+		    (when (save-excursion
+			    (goto-char line-start)
+			    (re-search-forward email-re line-end t))
+		      (goto-char line-start)
+		      (if (re-search-forward
+			   "PARTSTAT=\\([^;:\r\n]*\\)" line-end t)
+			  (throw 'found
+				 (org-caldav--partstat-to-reply
+				  (match-string 1)))
+			(throw 'found "Not replied yet"))))))))
+	(kill-buffer event-buf)))))
+
 (defun org-caldav-url-dav-delete-file (url)
   "Delete URL.
 Will switch to OAuth2 if necessary."
@@ -920,11 +1055,18 @@ Are you really sure? ")))
 	(org-caldav-debug-print 1 (format "Cal UID %s: Ignored." (car cur))))
        ((or (eq (org-caldav-event-status dbentry) 'changed-in-org)
 	    (eq (org-caldav-event-status dbentry) 'deleted-in-org))
-	(org-caldav-debug-print 1
-	 (format "Cal UID %s: Ignoring (Org always wins)." (car cur))))
+	(let* ((marker (org-id-find (car cur) t))
+	       (title (when marker (org-entry-get marker "ITEM"))))
+	  (org-caldav-debug-print 1
+	   (format "Cal UID %s (%s): Ignoring cal change (Org status: %s)."
+		   (car cur) (or title "?")
+		   (org-caldav-event-status dbentry)))))
        ((null (org-caldav-event-etag dbentry))
-	(org-caldav-debug-print 1
-	 (format "Cal UID %s: No Etag. Mark as change, so putting it again." (car cur)))
+	(let* ((marker (org-id-find (car cur) t))
+	       (title (when marker (org-entry-get marker "ITEM"))))
+	  (org-caldav-debug-print 1
+	   (format "Cal UID %s (%s): No stored etag, will re-push from Org."
+		   (car cur) (or title "?"))))
 	(org-caldav-event-set-status dbentry 'changed-in-org))
        ((not (string= (cdr cur) (org-caldav-event-etag dbentry)))
 	;; Event's etag changed.
@@ -1056,6 +1198,9 @@ If RESUME is non-nil, try to resume."
 	(dolist (cur org-caldav-event-list)
 	  (unless (eq (org-caldav-event-status cur) 'ignored)
 	    (org-caldav-event-set-status cur nil)))
+	;; Push local REPLY changes before the Org->Cal pipeline
+	;; runs, so the MD5 update prevents a spurious full export.
+	(org-caldav-push-reply-changes)
 	;; Update events for the org->cal direction
 	(when (org-caldav-sync-do-org->cal)
 	  ;; Export Org to icalendar format
@@ -1064,6 +1209,14 @@ If RESUME is non-nil, try to resume."
 	;; Update events for the cal->org direction
 	(when (org-caldav-sync-do-cal->org)
 	  (org-caldav-update-eventdb-from-cal)))
+      ;; When resuming, the ICS buffer from the aborted sync may have
+      ;; been killed.  Regenerate it so the org->cal phase below can
+      ;; push pending events and the cleanup at the end can delete the
+      ;; temporary file.
+      (when (and resume
+		 (org-caldav-sync-do-org->cal)
+		 (not (buffer-live-p org-caldav-ics-buffer)))
+	(setq org-caldav-ics-buffer (org-caldav-generate-ics)))
       (when (org-caldav-sync-do-org->cal)
 	(org-caldav-update-events-in-cal org-caldav-ics-buffer))
       (when  (org-caldav-sync-do-cal->org)
@@ -1071,10 +1224,11 @@ If RESUME is non-nil, try to resume."
       (org-caldav-save-sync-state)
       (setq org-caldav-event-list nil)
       (when (org-caldav-sync-do-org->cal)
-	(with-current-buffer org-caldav-ics-buffer
-	  (set-buffer-modified-p nil)
-	  (kill-buffer))
-	(delete-file (buffer-file-name org-caldav-ics-buffer))))))
+	(let ((icsfile (buffer-file-name org-caldav-ics-buffer)))
+	  (with-current-buffer org-caldav-ics-buffer
+	    (set-buffer-modified-p nil)
+	    (kill-buffer))
+	  (when icsfile (delete-file icsfile)))))))
 
 ;;;###autoload
 (defun org-caldav-sync ()
@@ -1100,7 +1254,43 @@ Should I try to resume? "))))
 	(org-caldav-sync-calendar calendar))))
   (when org-caldav-show-sync-results
     (org-caldav-display-sync-results))
-  (message "Finished sync."))
+  (message "%s" (org-caldav-sync-summary)))
+
+(defun org-caldav-sync-summary ()
+  "Return a one-line summary of the last sync."
+  (if (null org-caldav-sync-result)
+      "org-caldav sync: no changes."
+    (let ((cal->org 0) (org->cal 0) (reply 0)
+	  (deleted 0) (errors 0))
+      (dolist (entry org-caldav-sync-result)
+	(let ((action (nth 3 entry)))
+	  (cond
+	   ((eq action 'cal->org) (cl-incf cal->org))
+	   ((eq action 'org->cal)
+	    (if (eq (nth 2 entry) 'reply-pushed)
+		(cl-incf reply)
+	      (cl-incf org->cal)))
+	   ((memq action '(removed-from-org removed-from-cal))
+	    (cl-incf deleted))
+	   ((string-prefix-p "error" (symbol-name action))
+	    (cl-incf errors))
+	   (t nil))))
+      (let ((parts nil))
+	(when (> cal->org 0)
+	  (push (format "%d imported" cal->org) parts))
+	(when (> org->cal 0)
+	  (push (format "%d exported" org->cal) parts))
+	(when (> reply 0)
+	  (push (format "%d replied" reply) parts))
+	(when (> deleted 0)
+	  (push (format "%d deleted" deleted) parts))
+	(when (> errors 0)
+	  (push (format "%d errors" errors) parts))
+	(concat "org-caldav sync: "
+		(if parts
+		    (mapconcat #'identity (nreverse parts) ", ")
+		  "no changes")
+		".")))))
 
 (defun org-caldav-update-events-in-cal (icsbuf)
   "Update events in calendar.
@@ -1507,6 +1697,12 @@ level to add a new child entry."
 			    (org-caldav-event-status cur) 'cal->org)
 		      org-caldav-sync-result)
 		(setq buf (current-buffer))
+		;; Store imported reply in sync state.
+		(let ((att (cdr (assq 'attendee-data eventdata-alist))))
+		  (when att
+		    (org-caldav-event-set-reply
+		     cur (org-caldav--partstat-to-reply
+			  (plist-get att :my-partstat)))))
                 (when org-caldav-save-buffers (save-buffer)))
 	    (error
 	     ;; inbox file/headline could not be found
@@ -1612,6 +1808,12 @@ which can only be synced to calendar. Ignoring." uid))
               (when org-caldav-save-buffers (save-buffer))))))
 	;; Update the event database.
 	(org-caldav-event-set-status cur 'synced)
+	;; Store imported reply in sync state.
+	(let ((att (cdr (assq 'attendee-data eventdata-alist))))
+	  (when att
+	    (org-caldav-event-set-reply
+	     cur (org-caldav--partstat-to-reply
+		  (plist-get att :my-partstat)))))
 	(with-current-buffer buf
 	  (org-caldav-event-set-md5
 	   cur (md5 (buffer-substring-no-properties
@@ -1623,7 +1825,8 @@ which can only be synced to calendar. Ignoring." uid))
       (org-id-goto (car cur))
       (when (or (eq org-caldav-delete-org-entries 'always)
 		(and (eq org-caldav-delete-org-entries 'ask)
-		     (y-or-n-p "Delete this entry locally? ")))
+		     (y-or-n-p (format "Delete '%s' locally? "
+				       (or (org-entry-get (point) "ITEM") (car cur))))))
 	(delete-region (org-entry-beginning-position)
 		       (org-entry-end-position))
         (when org-caldav-save-buffers (save-buffer))
@@ -1634,6 +1837,109 @@ which can only be synced to calendar. Ignoring." uid))
 	(push (list org-caldav-calendar-id (car cur)
 		    'deleted-in-cal 'removed-from-org)
 	      org-caldav-sync-result)))))
+
+(defun org-caldav-push-reply-changes ()
+  "Scan events for REPLY property changes and push them to CalDAV.
+This runs early in the sync, after loading state and clearing
+statuses (so event status is nil for previously synced events).
+It updates MD5 and etag after push to prevent the normal Org->Cal
+pipeline from re-exporting the event."
+  (org-caldav-debug-print 1 "=== Checking for REPLY changes to push")
+  (let (events-pushed)
+    (dolist (cur org-caldav-event-list)
+      ;; After sync-state load and status clear, previously synced
+      ;; events have nil status.  Also accept 'synced for robustness.
+      (when (memq (org-caldav-event-status cur) '(nil synced))
+	(let* ((uid (car cur))
+	       (stored-reply (org-caldav-event-reply cur))
+	       (marker (org-id-find uid t))
+	       (org-reply (when marker
+			    (org-entry-get marker "REPLY")))
+	       (summary (when marker
+			  (org-entry-get marker "ITEM"))))
+	  ;; Bootstrap: when stored-reply is nil but org has a REPLY,
+	  ;; fetch the server's PARTSTAT to establish baseline.
+	  (when (and (null stored-reply) org-reply
+		     (org-caldav--reply-to-partstat org-reply))
+	    (org-caldav-debug-print
+	     1 (format "UID %s (%s): No stored reply, fetching from server."
+		       uid (or summary "?")))
+	    (let ((server-reply (org-caldav-get-server-reply uid)))
+	      (org-caldav-debug-print
+	       1 (format "UID %s: Server reply=%s, org reply=%s"
+			 uid server-reply org-reply))
+	      (if server-reply
+		  ;; Store server reply as baseline.
+		  (progn
+		    (org-caldav-event-set-reply cur server-reply)
+		    (setq stored-reply server-reply))
+		;; No ATTENDEE on server, store org reply as baseline.
+		(org-caldav-event-set-reply cur org-reply)
+		(setq stored-reply org-reply))))
+	  (org-caldav-debug-print
+	   2 (format "UID %s (%s): stored-reply=%s org-reply=%s"
+		     uid (or summary "?") stored-reply org-reply))
+	  (when (and stored-reply
+		     org-reply
+		     (not (string= org-reply stored-reply))
+		     (org-caldav--reply-to-partstat org-reply))
+	    (message "Pushing REPLY change for '%s': %s -> %s"
+		     (or summary uid) stored-reply org-reply)
+	    (org-caldav-debug-print
+	     1 (format "UID %s (%s): REPLY changed '%s' -> '%s', pushing."
+		       uid (or summary "?") stored-reply org-reply))
+	    (condition-case err
+		(if (org-caldav-push-reply uid org-reply)
+		    (progn
+		      (org-caldav-event-set-reply cur org-reply)
+		      (push uid events-pushed)
+		      (push (list org-caldav-calendar-id uid
+				  'reply-pushed 'org->cal)
+			    org-caldav-sync-result)
+		      (message "REPLY push succeeded for '%s'."
+			       (or summary uid))
+		      (org-caldav-debug-print
+		       1 (format "UID %s: REPLY push succeeded." uid)))
+		  (message "REPLY push FAILED for '%s'."
+			   (or summary uid))
+		  (org-caldav-debug-print
+		   1 (format "UID %s: REPLY push FAILED." uid))
+		  (push (list org-caldav-calendar-id uid
+			      'reply-pushed 'error:reply-push)
+			org-caldav-sync-result))
+	      (error
+	       (message "REPLY push error for '%s': %s"
+			(or summary uid) err)
+	       (org-caldav-debug-print
+		1 (format "UID %s: REPLY push error: %s" uid err))
+	       (push (list org-caldav-calendar-id uid
+			   'reply-pushed 'error:reply-push)
+		     org-caldav-sync-result)))))))
+    ;; Refresh etags and MD5 for pushed events to prevent
+    ;; the Org->Cal pipeline from re-exporting them.
+    (when events-pushed
+      (org-caldav-debug-print
+       1 (format "Refreshing etags for %d pushed reply events."
+		 (length events-pushed)))
+      (let ((fresh-etags (org-caldav-get-event-etag-list)))
+	(dolist (uid events-pushed)
+	  (let ((cur (org-caldav-search-event uid))
+		(etag-entry (assoc uid fresh-etags)))
+	    (when (and cur etag-entry)
+	      (org-caldav-event-set-etag cur (cdr etag-entry))
+	      (org-caldav-debug-print
+	       1 (format "UID %s: Updated etag to %s" uid (cdr etag-entry))))
+	    ;; Update MD5 so Org->Cal pipeline sees no change.
+	    (let ((marker (org-id-find uid t)))
+	      (when (and cur marker)
+		(with-current-buffer (marker-buffer marker)
+		  (goto-char (marker-position marker))
+		  (let ((new-md5 (md5 (buffer-substring-no-properties
+				       (org-entry-beginning-position)
+				       (org-entry-end-position)))))
+		    (org-caldav-event-set-md5 cur new-md5)
+		    (org-caldav-debug-print
+		     1 (format "UID %s: Updated MD5 to %s" uid new-md5))))))))))))
 
 (defun org-caldav--org-show-subtree ()
   "Helper function for compatibility.
@@ -1960,6 +2266,15 @@ Returns a plist with keys :organizer, :req-participants,
     ("DECLINED"     "Declined")
     ("TENTATIVE"    "Tentative")
     (_              "Not replied yet")))
+
+(defun org-caldav--reply-to-partstat (reply)
+  "Convert human-readable REPLY string to iCalendar PARTSTAT value.
+Returns nil for unknown values."
+  (pcase reply
+    ("Accepted"  "ACCEPTED")
+    ("Declined"  "DECLINED")
+    ("Tentative" "TENTATIVE")
+    (_           nil)))
 
 (defun org-caldav--insert-description (description)
   (when (> (length description) 0)
