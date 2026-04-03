@@ -506,7 +506,7 @@ To be removed when emacs dependency reaches >=27.1."
   (delq nil
 	(mapcar
 	 (lambda (event)
-	   (when (eq (car (last event)) status)
+	   (when (eq (org-caldav-event-status event) status)
 	     event))
 	 org-caldav-event-list)))
 
