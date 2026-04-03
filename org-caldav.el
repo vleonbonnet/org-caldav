@@ -1303,16 +1303,27 @@ ICSBUF is the buffer containing the exported iCalendar file."
 			  (org-caldav-filter-events 'changed-in-org)))
 	  (counter 0)
 	  (url-show-status nil)
-	  (event-etag (org-caldav-get-event-etag-list))
-	  uid)
+	  event-etag uid)
       ;; Put the events via CalDAV.
       (dolist (cur events)
         (setq counter (1+ counter))
-        (if (eq (org-caldav-event-etag cur) 'put)
-            (org-caldav-debug-print 1
-             (format "Event UID %s: Was already put previously." (car cur)))
+        (cond
+         ((let ((marker (org-id-find (car cur) t)))
+            (when marker
+              (prog1 (org-entry-get marker "ICAL_EVENT")
+                (when (markerp marker) (set-marker marker nil)))))
+          ;; Event was imported from calendar — don't re-export.
+          (org-caldav-debug-print 1
+           (format "Event UID %s: Imported event, skipping Org --> Cal" (car cur)))
+          (org-caldav-event-set-status cur 'synced))
+         ((eq (org-caldav-event-etag cur) 'put)
+          (org-caldav-debug-print 1
+           (format "Event UID %s: Was already put previously." (car cur))))
+         (t
           (org-caldav-debug-print 1
            (format "Event UID %s: Org --> Cal" (car cur)))
+          (unless event-etag
+            (setq event-etag (org-caldav-get-event-etag-list)))
           (widen)
           (goto-char (point-min))
           (while (and (setq uid (org-caldav-get-uid))
@@ -1329,7 +1340,9 @@ ICSBUF is the buffer containing the exported iCalendar file."
           (org-caldav-fix-categories)
           (org-caldav-fix-todo-dtstart)
           (org-caldav-fix-todo-remove-until)
-          (message "Putting event %d of %d Org --> Cal" counter (length events))
+          (message "Putting event %d of %d Org --> Cal: %s"
+                   counter (length events)
+                   (org-caldav-get-heading-from-uid (car cur)))
           (if (org-caldav-put-event icsbuf)
               (org-caldav-event-set-etag cur 'put)
             (org-caldav-debug-print 1
@@ -1337,12 +1350,13 @@ ICSBUF is the buffer containing the exported iCalendar file."
             (org-caldav-event-set-status cur 'error)
             (push (list org-caldav-calendar-id (car cur)
                         'error 'error:org->cal)
-                  org-caldav-sync-result))))
+                  org-caldav-sync-result)))))
       ;; Get Etags
-      (setq event-etag (org-caldav-get-event-etag-list))
+      (when (cl-some (lambda (e) (eq (org-caldav-event-etag e) 'put)) events)
+	(setq event-etag (org-caldav-get-event-etag-list)))
       (dolist (cur events)
 	(let ((etag (assoc (car cur) event-etag)))
-	  (when (and (not (eq (org-caldav-event-status cur) 'error))
+	  (when (and (not (memq (org-caldav-event-status cur) '(error synced)))
 		     etag)
 	    (org-caldav-event-set-etag cur (cdr etag))
 	    (push (list org-caldav-calendar-id (car cur)
@@ -1359,7 +1373,9 @@ ICSBUF is the buffer containing the exported iCalendar file."
 		    (y-or-n-p (format "Delete event '%s' from external calendar?"
 				       (org-caldav-get-calendar-summary-from-uid
 					(car cur)))))
-	    (message "Deleting event %d from %d" counter (length events))
+	    (message "Deleting event %d of %d from calendar: %s"
+		     counter (length events)
+		     (org-caldav-get-calendar-summary-from-uid (car cur)))
 	    (org-caldav-delete-event (car cur))
 	    (push (list org-caldav-calendar-id (car cur)
 			'deleted-in-org 'removed-from-cal)
@@ -1654,7 +1670,6 @@ level to add a new child entry."
       (catch 'next
 	(setq uid (car cur))
 	(setq counter (1+ counter))
-	(message "Getting event %d of %d" counter (length events))
 	(let ((event-buf (org-caldav-get-event uid)))
 	(unless event-buf
 	  ;; Event was deleted from server — skip it.
@@ -1678,6 +1693,9 @@ level to add a new child entry."
 	      (org-caldav-event-set-sequence
 	       cur (string-to-number (match-string 1)))))
 	  (setq eventdata-alist (org-caldav-convert-event-or-todo--from-buffer is-todo))))
+	(message "Getting event %d of %d Cal --> Org: %s"
+		 counter (length events)
+		 (or (alist-get 'summary eventdata-alist) uid))
 	(cond
 	 ((eq (org-caldav-event-status cur) 'new-in-cal)
 	  ;; This is a new event.
@@ -1703,7 +1721,7 @@ level to add a new child entry."
 		    (org-caldav-event-set-reply
 		     cur (org-caldav--partstat-to-reply
 			  (plist-get att :my-partstat)))))
-                (when org-caldav-save-buffers (save-buffer)))
+                )
 	    (error
 	     ;; inbox file/headline could not be found
 	     (org-caldav-event-set-status cur 'error)
