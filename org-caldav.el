@@ -1237,12 +1237,14 @@ If RESUME is non-nil, try to resume."
 		 (not (buffer-live-p org-caldav-ics-buffer)))
 	(setq org-caldav-ics-buffer (org-caldav-generate-ics)))
       (when (org-caldav-sync-do-org->cal)
-	(org-caldav-update-events-in-cal org-caldav-ics-buffer))
+	(org-caldav-update-events-in-cal
+	 (and (buffer-live-p org-caldav-ics-buffer) org-caldav-ics-buffer)))
       (when  (org-caldav-sync-do-cal->org)
 	(org-caldav-update-events-in-org))
       (org-caldav-save-sync-state)
       (setq org-caldav-event-list nil)
-      (when (org-caldav-sync-do-org->cal)
+      (when (and (org-caldav-sync-do-org->cal)
+		 (buffer-live-p org-caldav-ics-buffer))
 	(let ((icsfile (buffer-file-name org-caldav-ics-buffer)))
 	  (with-current-buffer org-caldav-ics-buffer
 	    (set-buffer-modified-p nil)
@@ -1320,7 +1322,8 @@ Should I try to resume? "))))
   "Update events in calendar.
 ICSBUF is the buffer containing the exported iCalendar file."
   (org-caldav-debug-print 1 "=== Updating events in calendar")
-  (with-current-buffer icsbuf
+  (when icsbuf
+   (with-current-buffer icsbuf
     (widen)
     (goto-char (point-min))
     (let ((events (append (org-caldav-filter-events 'new-in-org)
@@ -1385,7 +1388,7 @@ ICSBUF is the buffer containing the exported iCalendar file."
 	    (org-caldav-event-set-etag cur (cdr etag))
 	    (push (list org-caldav-calendar-id (car cur)
 			(org-caldav-event-status cur) 'org->cal)
-		  org-caldav-sync-result)))))
+		  org-caldav-sync-result)))))))
     ;; Remove events that were deleted in org
     (unless (eq org-caldav-delete-calendar-entries 'never)
       (let ((events (org-caldav-filter-events 'deleted-in-org))
@@ -1412,7 +1415,7 @@ ICSBUF is the buffer containing the exported iCalendar file."
     ;; Remove events that could not be put
     (dolist (cur (org-caldav-filter-events 'error))
       (setq org-caldav-event-list
-	    (delete cur org-caldav-event-list)))))
+	    (delete cur org-caldav-event-list))))
 
 (defun org-caldav-set-sequence-number (event event-etag)
   "Set sequence number in ics and in eventdb for EVENT.
