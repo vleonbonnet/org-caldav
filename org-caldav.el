@@ -1260,19 +1260,20 @@ If RESUME is non-nil, try to resume."
 		   (> emacs-minor-version 2)))
     (user-error "You have to use at least Emacs 24.3"))
   (org-caldav-debug-print 1 "========== Started sync.")
-  (if (and org-caldav-event-list
-	   (not (eq org-caldav-resume-aborted 'never))
-	   (or (eq org-caldav-resume-aborted 'always)
-	       (and (eq org-caldav-resume-aborted 'ask)
-	            (y-or-n-p "Last sync seems to have been aborted. \
+  (let ((inhibit-message t))
+    (if (and org-caldav-event-list
+	     (not (eq org-caldav-resume-aborted 'never))
+	     (or (eq org-caldav-resume-aborted 'always)
+		 (and (eq org-caldav-resume-aborted 'ask)
+		      (y-or-n-p "Last sync seems to have been aborted. \
 Should I try to resume? "))))
-      (org-caldav-sync-calendar org-caldav-previous-calendar t)
-    (setq org-caldav-sync-result nil)
-    (if (null org-caldav-calendars)
-	(org-caldav-sync-calendar)
-      (dolist (calendar org-caldav-calendars)
-	(org-caldav-debug-print 1 "Syncing first calendar entry:" calendar)
-	(org-caldav-sync-calendar calendar))))
+	(org-caldav-sync-calendar org-caldav-previous-calendar t)
+      (setq org-caldav-sync-result nil)
+      (if (null org-caldav-calendars)
+	  (org-caldav-sync-calendar)
+	(dolist (calendar org-caldav-calendars)
+	  (org-caldav-debug-print 1 "Syncing first calendar entry:" calendar)
+	  (org-caldav-sync-calendar calendar)))))
   (when org-caldav-show-sync-results
     (org-caldav-display-sync-results))
   ;; Clean up dead url.el connection buffers.
