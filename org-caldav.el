@@ -1956,24 +1956,25 @@ pipeline from re-exporting the event."
 		 1 (format "UID %s (%s): REPLY changed '%s' -> '%s', pushing."
 			   uid (or summary "?") stored-reply org-reply))
 		(condition-case err
-		    (if (org-caldav-push-reply uid org-reply)
-			(progn
-			  (org-caldav-event-set-reply cur org-reply)
-			  (push uid events-pushed)
-			  (push (list org-caldav-calendar-id uid
-				      'reply-pushed 'org->cal)
-				org-caldav-sync-result)
-			  (message "REPLY push succeeded for '%s'."
-				   (or summary uid))
-			  (org-caldav-debug-print
-			   1 (format "UID %s: REPLY push succeeded." uid)))
-		      (message "REPLY push FAILED for '%s'."
-			       (or summary uid))
-		      (org-caldav-debug-print
-		       1 (format "UID %s: REPLY push FAILED." uid))
-		      (push (list org-caldav-calendar-id uid
-				  'reply-pushed 'error:reply-push)
-			    org-caldav-sync-result))
+		    (let ((push-result (org-caldav-push-reply uid org-reply)))
+		      (cond
+		       (push-result
+			(org-caldav-event-set-reply cur org-reply)
+			(push uid events-pushed)
+			(push (list org-caldav-calendar-id uid
+				    'reply-pushed 'org->cal)
+			      org-caldav-sync-result)
+			(message "REPLY push succeeded for '%s'."
+				 (or summary uid))
+			(org-caldav-debug-print
+			 1 (format "UID %s: REPLY push succeeded." uid)))
+		       (t
+			;; No ATTENDEE found (organizer-owned event).
+			;; Accept the org reply as the new baseline.
+			(org-caldav-debug-print
+			 1 (format "UID %s: No ATTENDEE on server, accepting org reply '%s'."
+				   uid org-reply))
+			(org-caldav-event-set-reply cur org-reply))))
 		  (error
 		   (message "REPLY push error for '%s': %s"
 			    (or summary uid) err)
@@ -2067,9 +2068,8 @@ NEWLOCATION contains newlines, replace them with
         (when uid
           (org-set-property "OLDID" uid)
           (let ((inhibit-message t))
-            (org-delete-property "ID"))))
-      (let ((inhibit-message t))
-	(write-region (point-min) (point-max) org-caldav-backup-file t)))))
+            (org-delete-property "ID")))
+      (write-region (point-min) (point-max) org-caldav-backup-file t 'nomessage)))))
 
 (defun org-caldav-skip-function (backend)
   (org-caldav-debug-print 2 "Skipping over excluded entries")
@@ -2579,9 +2579,9 @@ See also `org-caldav-save-directory'."
 	            (prin1-to-string org-caldav-files))
       ")\n")
     ;; Save it.
-    (let ((inhibit-message t))
-      (write-region (point-min) (point-max)
-		    (org-caldav-sync-state-filename org-caldav-calendar-id)))))
+    (write-region (point-min) (point-max)
+		  (org-caldav-sync-state-filename org-caldav-calendar-id)
+		  nil 'nomessage)))
 
 (defun org-caldav-load-sync-state ()
   "Load org-caldav sync database from disk."
