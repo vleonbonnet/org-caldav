@@ -1035,11 +1035,21 @@ Are you really sure? ")))
 	  (org-caldav-debug-print 1
 	   (format "Org UID %s: Synced" uid))
 	  (org-caldav-event-set-status event 'in-org)))))
-    ;; Mark events deleted in Org
+    ;; Mark events deleted in Org (but not imported events skipped
+    ;; from the ICS export — those still exist in the org file).
     (dolist (cur (org-caldav-filter-events nil))
-      (org-caldav-debug-print
-       1 (format "Cal UID %s: Deleted in Org" (car cur)))
-      (org-caldav-event-set-status cur 'deleted-in-org))))
+      (let* ((marker (org-id-find (car cur) t))
+	     (imported (when marker
+			 (prog1 (org-entry-get marker "ICAL_EVENT")
+			   (when (markerp marker) (set-marker marker nil))))))
+	(if imported
+	    (progn
+	      (org-caldav-debug-print
+	       1 (format "Cal UID %s: Imported, keeping" (car cur)))
+	      (org-caldav-event-set-status cur 'synced))
+	  (org-caldav-debug-print
+	   1 (format "Cal UID %s: Deleted in Org" (car cur)))
+	  (org-caldav-event-set-status cur 'deleted-in-org))))))
 
 (defun org-caldav-update-eventdb-from-cal ()
   "Update event database from calendar."
@@ -1090,6 +1100,9 @@ Are you really sure? ")))
        ((eq (org-caldav-event-status dbentry) 'changed-in-org)
 	;; Do nothing
 	)
+       ((eq (org-caldav-event-status dbentry) 'synced)
+	;; Imported event already marked synced — update etag.
+	(org-caldav-event-set-etag dbentry (cdr cur)))
        (t
 	(error "Unknown status; this is probably a bug."))))
     ;; Mark events deleted in cal.
@@ -2062,8 +2075,9 @@ NEWLOCATION contains newlines, replace them with
      (lambda ()
        (let ((pt (save-excursion (apply 'org-agenda-skip-entry-if org-caldav-skip-conditions)))
               (ts (when org-caldav-days-in-past (* (abs org-caldav-days-in-past) -1)))
-              (stamp (or (org-entry-get nil "TIMESTAMP" t) (org-entry-get nil "CLOSED" t))))
-	 (when (or pt (and stamp ts (> ts (org-time-stamp-to-now stamp))))
+              (stamp (or (org-entry-get nil "TIMESTAMP" t) (org-entry-get nil "CLOSED" t)))
+	      (imported (org-entry-get nil "ICAL_EVENT")))
+	 (when (or pt imported (and stamp ts (> ts (org-time-stamp-to-now stamp))))
            (delete-region (point) (org-end-of-subtree t t))
            (setq org-map-continue-from (point)))))))
   (org-caldav-debug-print 2 "Finished skipping"))
@@ -2172,9 +2186,7 @@ Returns buffer containing the ICS file."
       (let ((inhibit-message t)
             (org-export-before-parsing-hook
 	     (append org-export-before-parsing-hook
-                     (when (or org-caldav-skip-conditions
-                               org-caldav-days-in-past)
-                       '(org-caldav-skip-function))
+                     '(org-caldav-skip-function)
                      (when org-caldav-todo-deadline-schedule-warning-days
                        '(org-caldav-scheduled-from-deadline))))
 	    (org-agenda-new-buffers nil))
