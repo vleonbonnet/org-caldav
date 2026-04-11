@@ -1260,7 +1260,9 @@ If RESUME is non-nil, try to resume."
 		   (> emacs-minor-version 2)))
     (user-error "You have to use at least Emacs 24.3"))
   (org-caldav-debug-print 1 "========== Started sync.")
-  (let ((inhibit-message t))
+  (cl-letf (((symbol-function 'message)
+	     (lambda (fmt &rest args)
+	       (org-caldav-debug-print 1 (apply #'format fmt args)))))
     (if (and org-caldav-event-list
 	     (not (eq org-caldav-resume-aborted 'never))
 	     (or (eq org-caldav-resume-aborted 'always)
@@ -1695,7 +1697,7 @@ level to add a new child entry."
 			(org-caldav-filter-events 'changed-in-cal)))
 	(url-show-status nil)
 	(counter 0)
-	eventdata-alist buf uid timesync is-todo)
+	eventdata-alist event-exceptions event-exdates buf uid timesync is-todo)
 
     (dolist (cur events)
       (catch 'next
@@ -1723,7 +1725,10 @@ level to add a new child entry."
 	    (when (re-search-forward "^SEQUENCE:\\s-*\\([0-9]+\\)" nil t)
 	      (org-caldav-event-set-sequence
 	       cur (string-to-number (match-string 1)))))
-	  (setq eventdata-alist (org-caldav-convert-event-or-todo--from-buffer is-todo))))
+	  (let ((parsed (org-caldav-convert-event-or-todo--from-buffer is-todo)))
+	    (setq eventdata-alist (plist-get parsed :master))
+	    (setq event-exceptions (plist-get parsed :exceptions))
+	    (setq event-exdates (plist-get parsed :exdates)))))
 	(message "Getting event %d of %d Cal --> Org: %s"
 		 counter (length events)
 		 (or (alist-get 'summary eventdata-alist) uid))
@@ -1733,15 +1738,41 @@ level to add a new child entry."
 	  (condition-case nil
 	      (with-current-buffer (find-file-noselect
 				    (org-caldav-inbox-file org-caldav-inbox))
-		(let ((point-and-level (org-caldav-inbox-point-and-level
-                                        org-caldav-inbox eventdata-alist)))
-		  (org-caldav-debug-print
-		   1 (format "Event UID %s: New in Cal --> Org inbox." uid))
-		  (goto-char (car point-and-level))
-		  (org-caldav-insert-org-event-or-todo
-		   (append eventdata-alist
-                           `((uid . ,uid)
-                             (level . ,(cdr point-and-level))))))
+		(let* ((base-uid (org-caldav--subseries-base-uid uid))
+		       (parent-marker (when base-uid
+					(org-id-find base-uid t)))
+		       ;; Compute exception-aware timestamps if applicable.
+		       (exc-ts (org-caldav--build-exception-aware-timestamps
+				eventdata-alist event-exceptions event-exdates))
+		       (full-alist (append eventdata-alist
+					  `((exception-timestamps . ,exc-ts)))))
+		  (if (and parent-marker
+			   (eq (marker-buffer parent-marker)
+			       (current-buffer)))
+		      ;; Sub-series with parent in same file:
+		      ;; insert as child of parent heading.
+		      (progn
+			(org-caldav-debug-print
+			 1 (format "Event UID %s: New sub-series --> child of %s."
+				   uid base-uid))
+			(goto-char (marker-position parent-marker))
+			(let ((level (org-current-level)))
+			  (org-end-of-subtree t t)
+			  (unless (bolp) (insert "\n"))
+			  (org-caldav-insert-org-event-or-todo
+			   (append full-alist
+				   `((uid . ,uid)
+				     (level . ,(1+ level)))))))
+		    ;; Normal insertion into inbox.
+		    (let ((point-and-level (org-caldav-inbox-point-and-level
+					    org-caldav-inbox eventdata-alist)))
+		      (org-caldav-debug-print
+		       1 (format "Event UID %s: New in Cal --> Org inbox." uid))
+		      (goto-char (car point-and-level))
+		      (org-caldav-insert-org-event-or-todo
+		       (append full-alist
+			       `((uid . ,uid)
+				 (level . ,(cdr point-and-level))))))))
 		(push (list org-caldav-calendar-id uid
 			    (org-caldav-event-status cur) 'cal->org)
 		      org-caldav-sync-result)
@@ -1816,15 +1847,55 @@ which can only be synced to calendar. Ignoring." uid))
 		      (setq timesync
                             (if (search-forward "<%%(" nil t)
                                 'orgsexp
-                              ;; org-caldav-create-time-range can mess
-                              ;; with replace-match, so we let-bind tr
-                              ;; before calling re-search-forward
-                              (let ((tr (org-caldav-create-time-range
-                                         .start-d .start-t
-                                         .end-d .end-t
-                                         .e-type .rrule-props)))
-                                (when (re-search-forward org-tsr-regexp nil t)
-                                  (replace-match tr nil t)))))
+                              (let ((exc-ts (org-caldav--build-exception-aware-timestamps
+                                             eventdata-alist event-exceptions event-exdates)))
+                                (if exc-ts
+                                    ;; Exception-aware: replace all timestamps
+                                    ;; with the computed set.
+                                    (let ((indent (if org-adapt-indentation "  " "")))
+                                      ;; Delete all active timestamp lines.
+                                      (goto-char (point-min))
+                                      (while (re-search-forward
+                                              (concat "^" (regexp-quote indent)
+                                                      org-tsr-regexp "\\s-*$")
+                                              nil t)
+                                        (delete-region (line-beginning-position)
+                                                       (min (1+ (line-end-position))
+                                                            (point-max))))
+                                      ;; Insert new timestamps after the heading
+                                      ;; and properties/logbook.
+                                      (goto-char (point-min))
+                                      (org-end-of-meta-data t)
+                                      (dolist (ts exc-ts)
+                                        (insert indent ts "\n"))
+                                      t)
+                                  ;; Normal: delete all bare timestamp
+                                  ;; lines then insert the new one.
+                                  (let ((indent (if org-adapt-indentation "  " ""))
+                                        (tr (org-caldav-create-time-range
+                                             .start-d .start-t
+                                             .end-d .end-t
+                                             .e-type .rrule-props))
+                                        (additional
+                                         (when (and .rrule-props
+                                                    (assoc 'UNTIL .rrule-props))
+                                           (org-caldav--rrule-additional-instances
+                                            .start-d .start-t .end-t
+                                            .rrule-props))))
+                                    (goto-char (point-min))
+                                    (while (re-search-forward
+                                            (concat "^" (regexp-quote indent)
+                                                    org-tsr-regexp "\\s-*$")
+                                            nil t)
+                                      (delete-region (line-beginning-position)
+                                                     (min (1+ (line-end-position))
+                                                          (point-max))))
+                                    (goto-char (point-min))
+                                    (org-end-of-meta-data t)
+                                    (insert indent tr "\n")
+                                    (dolist (ts additional)
+                                      (insert indent ts "\n"))
+                                    t)))))
                       (widen))
                   ;; Sync scheduled
                   (when .start-d
@@ -1857,12 +1928,25 @@ which can only be synced to calendar. Ignoring." uid))
               )))))
 	;; Update the event database.
 	(org-caldav-event-set-status cur 'synced)
-	;; Store imported reply in sync state.
+	;; Store imported reply in sync state and update org heading.
 	(let ((att (cdr (assq 'attendee-data eventdata-alist))))
 	  (when att
-	    (org-caldav-event-set-reply
-	     cur (org-caldav--partstat-to-reply
-		  (plist-get att :my-partstat)))))
+	    (let ((server-reply (org-caldav--partstat-to-reply
+				 (plist-get att :my-partstat))))
+	      (org-caldav-event-set-reply cur server-reply)
+	      ;; Keep the org REPLY property in sync with the server so
+	      ;; that push-reply-changes won't push a stale acceptance
+	      ;; when the organizer has updated the event.
+	      (when server-reply
+		(let ((marker (org-id-find uid t)))
+		  (when marker
+		    (let ((org-reply (org-entry-get marker "REPLY")))
+		      (when (and org-reply
+				 (not (string= org-reply server-reply)))
+			(org-caldav-debug-print
+			 1 (format "UID %s: Updating org REPLY '%s' -> '%s' to match server."
+				   uid org-reply server-reply))
+			(org-entry-put marker "REPLY" server-reply)))))))))
 	(with-current-buffer buf
 	  (org-caldav-event-set-md5
 	   cur (md5 (buffer-substring-no-properties
@@ -2410,11 +2494,22 @@ Returns MD5 from entry."
           (when .uid (org-set-property "ID" (url-unhex-string .uid)))
           (org-caldav-insert-org-entry--wrapup .categories))
       (insert (make-string (or .level 1) ?*) " " .summary "\n")
-      (insert (if org-adapt-indentation "  " "")
-              (org-caldav-create-time-range .start-d .start-t
-                                            .end-d .end-t
-                                            .e-type .rrule-props)
-               "\n")
+      (let ((indent (if org-adapt-indentation "  " "")))
+        (if .exception-timestamps
+            ;; Exception-aware mode: use pre-computed timestamps.
+            (dolist (ts .exception-timestamps)
+              (insert indent ts "\n"))
+          ;; Normal mode: single timestamp with optional repeater.
+          (insert indent
+                  (org-caldav-create-time-range .start-d .start-t
+                                                .end-d .end-t
+                                                .e-type .rrule-props)
+                  "\n")
+          ;; For UNTIL-bounded recurring events, add remaining instances.
+          (when (and .rrule-props (assoc 'UNTIL .rrule-props))
+            (dolist (ts (org-caldav--rrule-additional-instances
+                         .start-d .start-t .end-t .rrule-props))
+              (insert indent ts "\n")))))
       (org-caldav--insert-description .description)
       (forward-line -1)
       (when .uid
@@ -2513,7 +2608,7 @@ Sets the block's TAGS, and return its md5."
       (backward-char 1)
       (when end-t
         (insert "-" end-t))
-      (when rrule-props
+      (when (and rrule-props (not (assoc 'UNTIL rrule-props)))
         (insert (format " +%d%s"
                         (read (or (cadr (assoc 'INTERVAL rrule-props)) "1"))
                         (downcase (substring (cadr (assoc 'FREQ rrule-props)) 0 1))))))
@@ -2545,7 +2640,7 @@ DATE is given as european date \"DD MM YYYY\"."
      (if time
          (format-time-string "%Y-%m-%d %a %H:%M" internaltime)
        (format-time-string "%Y-%m-%d %a" internaltime))
-     (when rrule-props
+     (when (and rrule-props (not (assoc 'UNTIL rrule-props)))
        (format " +%d%s" (read (or (cadr (assoc 'INTERVAL rrule-props)) "1"))
                (downcase (substring (cadr (assoc 'FREQ rrule-props)) 0 1)))))))
 
@@ -2554,6 +2649,247 @@ DATE is given as european date \"DD MM YYYY\"."
 DATE is given as european date \"DD MM YYYY\"."
   (let ((sdate (mapcar 'string-to-number (split-string date))))
     (list (nth 1 sdate) (nth 0 sdate) (nth 2 sdate))))
+
+(defun org-caldav--parse-ical-datetime (dt-string)
+  "Parse iCalendar datetime DT-STRING to Emacs time value.
+Handles formats like \"20260210T075959Z\" and \"20260210\"."
+  (when (and dt-string (>= (length dt-string) 8))
+    (let* ((year (string-to-number (substring dt-string 0 4)))
+           (month (string-to-number (substring dt-string 4 6)))
+           (day (string-to-number (substring dt-string 6 8)))
+           (has-time (and (> (length dt-string) 8)
+                          (eq (aref dt-string 8) ?T)))
+           (hour (if has-time (string-to-number (substring dt-string 9 11)) 23))
+           (min (if has-time (string-to-number (substring dt-string 11 13)) 59))
+           (sec (if has-time (string-to-number (substring dt-string 13 15)) 59))
+           (tz (if (string-suffix-p "Z" dt-string) 0 nil)))
+      (encode-time sec min hour day month year tz))))
+
+(defun org-caldav--rrule-additional-instances (start-d start-t end-t rrule-props)
+  "Compute additional instance timestamps for an RRULE with UNTIL.
+Returns a list of Org timestamp strings for all instances after the first.
+START-D is European date \"DD MM YYYY\", START-T/END-T are \"HH:MM\" or nil.
+RRULE-PROPS is the parsed RRULE alist containing FREQ, INTERVAL, and UNTIL."
+  (let* ((until-str (cadr (assoc 'UNTIL rrule-props)))
+         (freq (cadr (assoc 'FREQ rrule-props)))
+         (interval (string-to-number
+                    (or (cadr (assoc 'INTERVAL rrule-props)) "1")))
+         (until-time (org-caldav--parse-ical-datetime until-str))
+         (sdate (org-caldav--convert-to-calendar start-d))
+         (stime (when start-t
+                  (mapcar #'string-to-number (split-string start-t ":"))))
+         (hours (if stime (car stime) 0))
+         (minutes (if stime (nth 1 stime) 0))
+         (cur-decoded (decode-time
+                       (encode-time 0 minutes hours
+                                    (calendar-extract-day sdate)
+                                    (calendar-extract-month sdate)
+                                    (calendar-extract-year sdate))))
+         (delta (pcase freq
+                  ("DAILY" (make-decoded-time :day interval))
+                  ("WEEKLY" (make-decoded-time :day (* 7 interval)))
+                  ("MONTHLY" (make-decoded-time :month interval))
+                  ("YEARLY" (make-decoded-time :year interval))))
+         (result nil))
+    (when (and until-time delta)
+      ;; Advance past the first instance
+      (setq cur-decoded (decoded-time-add cur-decoded delta))
+      ;; Collect remaining instances while within UNTIL bound
+      (while (not (time-less-p until-time (encode-time cur-decoded)))
+        (let* ((itime (encode-time cur-decoded))
+               (date-str (if start-t
+                             (format-time-string "%Y-%m-%d %a %H:%M" itime)
+                           (format-time-string "%Y-%m-%d %a" itime))))
+          (push (concat "<" date-str
+                        (when end-t (concat "-" end-t))
+                        ">")
+                result))
+        (setq cur-decoded (decoded-time-add cur-decoded delta))))
+    (nreverse result)))
+
+(defun org-caldav--rrule-next-instance (cur-decoded freq interval byday)
+  "Advance CUR-DECODED to the next RRULE instance.
+FREQ is \"DAILY\", \"WEEKLY\", \"MONTHLY\", or \"YEARLY\".
+INTERVAL is the repeat interval.  BYDAY is the BYDAY value
+\(e.g., \"3FR\" for 3rd Friday) or nil."
+  (pcase freq
+    ("DAILY"
+     (decoded-time-add cur-decoded (make-decoded-time :day interval)))
+    ("WEEKLY"
+     (decoded-time-add cur-decoded (make-decoded-time :day (* 7 interval))))
+    ("MONTHLY"
+     (if (and byday (string-match "\\([0-9]+\\)\\([A-Z]\\{2\\}\\)" byday))
+         ;; BYDAY with ordinal: e.g., "3FR" = 3rd Friday.
+         (let* ((nth (string-to-number (match-string 1 byday)))
+                (day-abbr (match-string 2 byday))
+                (dow (cdr (assoc day-abbr
+                                '(("SU" . 0) ("MO" . 1) ("TU" . 2)
+                                  ("WE" . 3) ("TH" . 4) ("FR" . 5)
+                                  ("SA" . 6)))))
+                ;; Advance to the next month.
+                (next-month (decoded-time-add cur-decoded
+                                              (make-decoded-time :month interval)))
+                (year (decoded-time-year next-month))
+                (month (decoded-time-month next-month))
+                ;; Find the Nth DOW of that month.
+                ;; Start from the 1st of the month.
+                (first-of-month (encode-time 0
+                                             (decoded-time-minute cur-decoded)
+                                             (decoded-time-hour cur-decoded)
+                                             1 month year))
+                (first-dow (decoded-time-weekday (decode-time first-of-month)))
+                ;; Days until the first matching weekday.
+                (days-to-first (mod (- dow first-dow) 7))
+                ;; Day of month for the Nth occurrence.
+                (target-day (+ 1 days-to-first (* 7 (1- nth)))))
+           (decode-time (encode-time 0
+                                     (decoded-time-minute cur-decoded)
+                                     (decoded-time-hour cur-decoded)
+                                     target-day month year)))
+       ;; Simple monthly: same day, next month.
+       (decoded-time-add cur-decoded (make-decoded-time :month interval))))
+    ("YEARLY"
+     (decoded-time-add cur-decoded (make-decoded-time :year interval)))
+    (_ (decoded-time-add cur-decoded (make-decoded-time :day 1)))))
+
+(defun org-caldav--build-exception-aware-timestamps
+    (master-alist exception-alists exdates)
+  "Build a list of Org timestamp strings for a recurring event with exceptions.
+MASTER-ALIST is the main event data (with RRULE).  EXCEPTION-ALISTS is a list
+of event data alists for modified instances (each has a `recurrence-id' key).
+EXDATES is a list of iCal date strings for cancelled instances.
+
+Returns a list of timestamp strings, or nil if there are no exceptions or
+exdates (meaning the caller should use normal repeater behavior).
+
+The strategy: expand individual timestamps from DTSTART up to the last
+exception/exdate date.  Exception dates use their modified time, exdate dates
+are skipped, regular dates use the master's time.  The final timestamp carries
+the repeater for all future instances."
+  (let-alist master-alist
+    (let* ((rrule-props .rrule-props)
+           (freq (cadr (assoc 'FREQ rrule-props)))
+           (interval (string-to-number
+                      (or (cadr (assoc 'INTERVAL rrule-props)) "1")))
+           (byday (cadr (assoc 'BYDAY rrule-props))))
+      (when (and (or exception-alists exdates) freq)
+        ;; Build lookup tables for special dates.
+        ;; Key: "YYYY-MM-DD" string, value: exception alist or 'cancelled.
+        (let ((special-dates (make-hash-table :test 'equal))
+              (last-special-time nil))
+          ;; Register exception dates (keyed by RECURRENCE-ID date).
+          (dolist (exc exception-alists)
+            (let* ((recurrence-id (cdr (assq 'recurrence-id exc)))
+                   (exc-time (org-caldav--parse-ical-datetime recurrence-id))
+                   (date-key (format-time-string "%Y-%m-%d" exc-time)))
+              (puthash date-key exc special-dates)
+              (when (or (null last-special-time)
+                        (time-less-p last-special-time exc-time))
+                (setq last-special-time exc-time))))
+          ;; Register exdates.
+          (dolist (exd exdates)
+            (let* ((exd-time (org-caldav--parse-ical-datetime exd))
+                   (date-key (format-time-string "%Y-%m-%d" exd-time)))
+              (puthash date-key 'cancelled special-dates)
+              (when (or (null last-special-time)
+                        (time-less-p last-special-time exd-time))
+                (setq last-special-time exd-time))))
+          ;; Generate instance dates from master DTSTART to last-special-time.
+          (let* ((sdate (org-caldav--convert-to-calendar .start-d))
+                 (stime (when .start-t
+                          (mapcar #'string-to-number
+                                  (split-string .start-t ":"))))
+                 (hours (if stime (car stime) 0))
+                 (minutes (if stime (nth 1 stime) 0))
+                 (start-time (encode-time 0 minutes hours
+                                          (calendar-extract-day sdate)
+                                          (calendar-extract-month sdate)
+                                          (calendar-extract-year sdate)))
+                 (cur-decoded (decode-time start-time))
+                 (result nil))
+            ;; Walk through instances up to and including the last special date.
+            (while (not (time-less-p last-special-time
+                                     (encode-time cur-decoded)))
+              (let* ((cur-time (encode-time cur-decoded))
+                     (date-key (format-time-string "%Y-%m-%d" cur-time))
+                     (special (gethash date-key special-dates)))
+                (cond
+                 ;; Cancelled instance — skip.
+                 ((eq special 'cancelled) nil)
+                 ;; Exception instance — use its actual DTSTART date and time.
+                 (special
+                  (let* ((exc-start-d (cdr (assq 'start-d special)))
+                         (exc-start-t (cdr (assq 'start-t special)))
+                         (exc-end-t (cdr (assq 'end-t special)))
+                         (exc-sdate (org-caldav--convert-to-calendar exc-start-d))
+                         (exc-time (encode-time
+                                    0
+                                    (if exc-start-t
+                                        (string-to-number
+                                         (substring exc-start-t 3 5))
+                                      0)
+                                    (if exc-start-t
+                                        (string-to-number
+                                         (substring exc-start-t 0 2))
+                                      0)
+                                    (calendar-extract-day exc-sdate)
+                                    (calendar-extract-month exc-sdate)
+                                    (calendar-extract-year exc-sdate)))
+                         (ts-date (if exc-start-t
+                                      (format-time-string "%Y-%m-%d %a %H:%M"
+                                                          exc-time)
+                                    (format-time-string "%Y-%m-%d %a"
+                                                        exc-time)))
+                         (exc-ts (concat "<" ts-date
+                                         (when exc-end-t
+                                           (concat "-" exc-end-t))
+                                         ">")))
+                    (push exc-ts result)))
+                 ;; Regular instance — use master's time pattern.
+                 (t
+                  (let* ((itime (encode-time cur-decoded))
+                         (ts-date (if .start-t
+                                      (format-time-string "%Y-%m-%d %a %H:%M"
+                                                          itime)
+                                    (format-time-string "%Y-%m-%d %a" itime)))
+                         (ts (concat "<" ts-date
+                                     (when .end-t
+                                       (concat "-" .end-t))
+                                     ">")))
+                    (push ts result)))))
+              ;; Advance to next instance.
+              (setq cur-decoded
+                    (org-caldav--rrule-next-instance cur-decoded
+                                                     freq interval byday)))
+            ;; Final timestamp: next regular instance after all specials.
+            ;; Only add a repeater if the RRULE has no UNTIL bound;
+            ;; otherwise the expanded timestamps already cover everything.
+            (let* ((until-str (cadr (assoc 'UNTIL rrule-props)))
+                   (until-time (when until-str
+                                 (org-caldav--parse-ical-datetime until-str)))
+                   (itime (encode-time cur-decoded)))
+              ;; Skip if UNTIL is set and we've gone past it.
+              (unless (and until-time (time-less-p until-time itime))
+                (let* ((ts-date (if .start-t
+                                    (format-time-string "%Y-%m-%d %a %H:%M" itime)
+                                  (format-time-string "%Y-%m-%d %a" itime)))
+                       (repeater (unless until-time
+                                   (format " +%d%s" interval
+                                           (downcase (substring freq 0 1)))))
+                       (ts (concat "<" ts-date
+                                   (when .end-t (concat "-" .end-t))
+                                   (or repeater "") ">")))
+                  (push ts result))))
+            (nreverse result)))))))
+
+(defun org-caldav--subseries-base-uid (uid)
+  "Extract the base UID from a Google Calendar sub-series UID.
+When a recurring event is edited with \"this and following events\",
+Google creates sub-series VEVENTs with UIDs like
+\"baseUID_R20260210T160000@google.com\".  Returns the base UID
+\(e.g., \"baseUID@google.com\"), or nil if UID is not a sub-series."
+  (when (string-match "\\(.+\\)_R[0-9]\\{8\\}T[0-9]\\{6\\}\\(@.+\\)" uid)
+    (concat (match-string 1 uid) (match-string 2 uid))))
 
 (defun org-caldav-save-sync-state ()
   "Save org-caldav sync database to disk.
@@ -2740,8 +3076,12 @@ puts them in a plist."
 ;; The following is taken from icalendar.el, written by Ulf Jasper.
 (defun org-caldav-convert-event-or-todo--from-buffer (is-todo)
   "Convert icalendar event or todo in current buffer.
-If IS-TODO, it is a VTODO, else a VEVENT.  Returns an alist of properties
-which can be fed into `org-caldav-insert-org-event-or-todo'."
+Returns a plist (:master ALIST :exceptions LIST :exdates LIST).
+:master is the main event/todo alist (fed into
+`org-caldav-insert-org-event-or-todo').  :exceptions is a list of
+alists for VEVENT instances with RECURRENCE-ID (modified single
+instances).  :exdates is a list of cancelled-instance date strings.
+When there are no exceptions or exdates those keys are nil."
   (let ((decoded (decode-coding-region (point-min) (point-max) 'utf-8 t)))
     (erase-buffer)
     (set-buffer-multibyte t)
@@ -2750,12 +3090,39 @@ which can be fed into `org-caldav-insert-org-event-or-todo'."
   (goto-char (point-min))
   (let* ((calendar-date-style 'european)
 	 (ical-list (icalendar--read-element nil nil))
-	 (zone-map (icalendar--convert-all-timezones ical-list)))
-    (org-caldav-convert-event-or-todo--from-element
-     is-todo zone-map
-     (car (if is-todo
-              (org-caldav--icalendar--all-todos ical-list)
-            (icalendar--all-events ical-list))))))
+	 (zone-map (icalendar--convert-all-timezones ical-list))
+         (all-elements (if is-todo
+                           (org-caldav--icalendar--all-todos ical-list)
+                         (icalendar--all-events ical-list)))
+         master-element exceptions-elements exdates)
+    ;; Classify VEVENTs: master (no RECURRENCE-ID) vs exception.
+    (dolist (e all-elements)
+      (if (icalendar--get-event-property e 'RECURRENCE-ID)
+          (push e exceptions-elements)
+        (setq master-element e)))
+    ;; Fall back to first element if no master found.
+    (unless master-element
+      (setq master-element (car all-elements)))
+    ;; Extract EXDATE from master (may be comma-separated or multiple props).
+    (when master-element
+      (let ((exdate-str (icalendar--get-event-property master-element 'EXDATE)))
+        (when exdate-str
+          (setq exdates (split-string exdate-str "," t "[ \t]+")))))
+    (let ((master-alist
+           (when master-element
+             (org-caldav-convert-event-or-todo--from-element
+              is-todo zone-map master-element)))
+          (exception-alists
+           (mapcar (lambda (e)
+                     (let ((alist (org-caldav-convert-event-or-todo--from-element
+                                   is-todo zone-map e))
+                           (recurrence-id
+                            (icalendar--get-event-property e 'RECURRENCE-ID)))
+                       (append alist `((recurrence-id . ,recurrence-id)))))
+                   (nreverse exceptions-elements))))
+      (list :master master-alist
+            :exceptions exception-alists
+            :exdates exdates))))
 
 (defun org-caldav-convert-event-or-todo--from-element (is-todo zone-map e)
   "Convert event/todo from icalendar element E.
