@@ -2795,7 +2795,10 @@ the repeater for all future instances."
                         (time-less-p last-special-time exd-time))
                 (setq last-special-time exd-time))))
           ;; Generate instance dates from master DTSTART to last-special-time.
-          (let* ((sdate (org-caldav--convert-to-calendar .start-d))
+          (let* ((until-str (cadr (assoc 'UNTIL rrule-props)))
+                 (until-time (when until-str
+                               (org-caldav--parse-ical-datetime until-str)))
+                 (sdate (org-caldav--convert-to-calendar .start-d))
                  (stime (when .start-t
                           (mapcar #'string-to-number
                                   (split-string .start-t ":"))))
@@ -2812,8 +2815,12 @@ the repeater for all future instances."
                                      (encode-time cur-decoded)))
               (let* ((cur-time (encode-time cur-decoded))
                      (date-key (format-time-string "%Y-%m-%d" cur-time))
-                     (special (gethash date-key special-dates)))
+                     (special (gethash date-key special-dates))
+                     ;; Skip instances past UNTIL.
+                     (past-until (and until-time
+                                     (time-less-p until-time cur-time))))
                 (cond
+                 (past-until nil)
                  ;; Cancelled instance — skip.
                  ((eq special 'cancelled) nil)
                  ;; Exception instance — use its actual DTSTART date and time.
@@ -2864,10 +2871,7 @@ the repeater for all future instances."
             ;; Final timestamp: next regular instance after all specials.
             ;; Only add a repeater if the RRULE has no UNTIL bound;
             ;; otherwise the expanded timestamps already cover everything.
-            (let* ((until-str (cadr (assoc 'UNTIL rrule-props)))
-                   (until-time (when until-str
-                                 (org-caldav--parse-ical-datetime until-str)))
-                   (itime (encode-time cur-decoded)))
+            (let* ((itime (encode-time cur-decoded)))
               ;; Skip if UNTIL is set and we've gone past it.
               (unless (and until-time (time-less-p until-time itime))
                 (let* ((ts-date (if .start-t
