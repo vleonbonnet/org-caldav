@@ -1849,53 +1849,27 @@ which can only be synced to calendar. Ignoring." uid))
                                 'orgsexp
                               (let ((exc-ts (org-caldav--build-exception-aware-timestamps
                                              eventdata-alist event-exceptions event-exdates)))
-                                (if exc-ts
-                                    ;; Exception-aware: replace all timestamps
-                                    ;; with the computed set.
-                                    (let ((indent (if org-adapt-indentation "  " "")))
-                                      ;; Delete all active timestamp lines.
-                                      (goto-char (point-min))
-                                      (while (re-search-forward
-                                              (concat "^" (regexp-quote indent)
-                                                      org-tsr-regexp "\\s-*$")
-                                              nil t)
-                                        (delete-region (line-beginning-position)
-                                                       (min (1+ (line-end-position))
-                                                            (point-max))))
-                                      ;; Insert new timestamps after the heading
-                                      ;; and properties/logbook.
-                                      (goto-char (point-min))
-                                      (org-end-of-meta-data t)
-                                      (dolist (ts exc-ts)
-                                        (insert indent ts "\n"))
-                                      t)
-                                  ;; Normal: delete all bare timestamp
-                                  ;; lines then insert the new one.
-                                  (let ((indent (if org-adapt-indentation "  " ""))
-                                        (tr (org-caldav-create-time-range
-                                             .start-d .start-t
-                                             .end-d .end-t
-                                             .e-type .rrule-props))
-                                        (additional
-                                         (when (and .rrule-props
-                                                    (assoc 'UNTIL .rrule-props))
-                                           (org-caldav--rrule-additional-instances
-                                            .start-d .start-t .end-t
-                                            .rrule-props))))
-                                    (goto-char (point-min))
-                                    (while (re-search-forward
-                                            (concat "^" (regexp-quote indent)
-                                                    org-tsr-regexp "\\s-*$")
-                                            nil t)
-                                      (delete-region (line-beginning-position)
-                                                     (min (1+ (line-end-position))
-                                                          (point-max))))
-                                    (goto-char (point-min))
-                                    (org-end-of-meta-data t)
-                                    (insert indent tr "\n")
-                                    (dolist (ts additional)
-                                      (insert indent ts "\n"))
-                                    t)))))
+                                (let ((indent (if org-adapt-indentation "  " "")))
+                                  (if exc-ts
+                                      ;; Exception-aware: replace the contiguous
+                                      ;; bare-timestamp block with the computed set.
+                                      (org-caldav--replace-bare-timestamps
+                                       indent exc-ts)
+                                    ;; Normal: replace the block with the master
+                                    ;; timestamp plus any UNTIL-bounded instances.
+                                    (let ((tr (org-caldav-create-time-range
+                                               .start-d .start-t
+                                               .end-d .end-t
+                                               .e-type .rrule-props))
+                                          (additional
+                                           (when (and .rrule-props
+                                                      (assoc 'UNTIL .rrule-props))
+                                             (org-caldav--rrule-additional-instances
+                                              .start-d .start-t .end-t
+                                              .rrule-props))))
+                                      (org-caldav--replace-bare-timestamps
+                                       indent (cons tr additional))))
+                                  t))))
                       (widen))
                   ;; Sync scheduled
                   (when .start-d
@@ -2885,6 +2859,33 @@ the repeater for all future instances."
                                    (or repeater "") ">")))
                   (push ts result))))
             (nreverse result)))))))
+
+(defun org-caldav--replace-bare-timestamps (indent timestamps)
+  "Replace the contiguous bare-timestamp block at point with TIMESTAMPS.
+INDENT is the indentation string prepended to each timestamp line.
+TIMESTAMPS is a list of org timestamp strings (without trailing newline).
+
+Caller must have narrowed to the entry's subtree and positioned
+point at the heading.  This function moves to the end of the
+heading's meta-data, deletes the contiguous block of lines that
+look like bare active timestamps, and inserts TIMESTAMPS in its
+place.  Non-timestamp content (meeting links, descriptions, child
+headings) is preserved.
+
+This is more reliable than scanning the whole subtree for
+timestamp-shaped lines, which can accidentally match dates that
+appear inside summary text or fail to remove stale lines if the
+caller's intent is to fully replace the block."
+  (goto-char (point-min))
+  (org-end-of-meta-data t)
+  (let ((block-start (point))
+        (regexp (concat "^" (regexp-quote indent)
+                        org-tsr-regexp "\\s-*$")))
+    (while (and (not (eobp)) (looking-at regexp))
+      (forward-line 1))
+    (delete-region block-start (point)))
+  (dolist (ts timestamps)
+    (insert indent ts "\n")))
 
 (defun org-caldav--subseries-base-uid (uid)
   "Extract the base UID from a Google Calendar sub-series UID.
