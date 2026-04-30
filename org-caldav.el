@@ -1175,8 +1175,18 @@ If RESUME is non-nil, try to resume."
 	      (if (yes-or-no-p (format "File %s does not exist, create it?" filename))
 		  (write-region "" nil filename)
 		(user-error "File %s does not exist" filename))))
-	  ;; prevent https://github.com/dengste/org-caldav/issues/230
-	  (org-id-update-id-locations files-for-sync t)))
+	  ;; Refresh org-id-locations only when there are actual Org source
+	  ;; files to export.  `org-id-update-id-locations' ignores the
+	  ;; FILES argument's intent and re-scans every file in
+	  ;; `org-agenda-files', `org-id-extra-files' and `org-id-files',
+	  ;; which on networked filesystems can take minutes.  Without
+	  ;; `org-caldav-files', the Org->Cal pipeline only runs
+	  ;; `org-caldav-push-reply-changes', which resolves UIDs through
+	  ;; the existing `org-id-locations' cache (populated when we
+	  ;; first imported those events) -- so the scan is pure overhead.
+	  (when org-caldav-files
+	    ;; prevent https://github.com/dengste/org-caldav/issues/230
+	    (org-id-update-id-locations files-for-sync t))))
       ;; Check if we need to do OAuth2
       (when (org-caldav-use-oauth2)
 	;; We need to do oauth2. Check if it is available.
