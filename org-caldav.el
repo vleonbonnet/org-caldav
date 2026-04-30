@@ -2475,7 +2475,14 @@ Returns MD5 from entry."
                             .rrule-props)))
           (when .completed-d
             (org-add-planning-info 'closed (org-caldav-convert-to-org-time .completed-d .completed-t)))
-          (when .uid (org-set-property "ID" (url-unhex-string .uid)))
+          (when .uid
+            (let ((id (url-unhex-string .uid)))
+              (org-set-property "ID" id)
+              ;; Register the UID in `org-id-locations' so subsequent
+              ;; `org-id-find' calls don't trigger a full rescan of
+              ;; `org-agenda-files' as their cache-miss fallback.
+              (org-id-add-location
+               id (buffer-file-name (buffer-base-buffer)))))
           (org-caldav-insert-org-entry--wrapup .categories))
       (insert (make-string (or .level 1) ?*) " " .summary "\n")
       (let ((indent (if org-adapt-indentation "  " "")))
@@ -2497,7 +2504,13 @@ Returns MD5 from entry."
       (org-caldav--insert-description .description)
       (forward-line -1)
       (when .uid
-        (org-set-property "ID" (url-unhex-string .uid)))
+        (let ((id (url-unhex-string .uid)))
+          (org-set-property "ID" id)
+          ;; Register the UID in `org-id-locations' so subsequent
+          ;; `org-id-find' calls don't trigger a full rescan of
+          ;; `org-agenda-files' as their cache-miss fallback.
+          (org-id-add-location
+           id (buffer-file-name (buffer-base-buffer)))))
       (org-caldav-change-location .location)
       (when .attendee-data
         (let ((att .attendee-data))
