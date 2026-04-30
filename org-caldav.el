@@ -1175,18 +1175,8 @@ If RESUME is non-nil, try to resume."
 	      (if (yes-or-no-p (format "File %s does not exist, create it?" filename))
 		  (write-region "" nil filename)
 		(user-error "File %s does not exist" filename))))
-	  ;; Refresh org-id-locations only when there are actual Org source
-	  ;; files to export.  `org-id-update-id-locations' ignores the
-	  ;; FILES argument's intent and re-scans every file in
-	  ;; `org-agenda-files', `org-id-extra-files' and `org-id-files',
-	  ;; which on networked filesystems can take minutes.  Without
-	  ;; `org-caldav-files', the Org->Cal pipeline only runs
-	  ;; `org-caldav-push-reply-changes', which resolves UIDs through
-	  ;; the existing `org-id-locations' cache (populated when we
-	  ;; first imported those events) -- so the scan is pure overhead.
-	  (when org-caldav-files
-	    ;; prevent https://github.com/dengste/org-caldav/issues/230
-	    (org-id-update-id-locations files-for-sync t))))
+	  ;; prevent https://github.com/dengste/org-caldav/issues/230
+	  (org-id-update-id-locations files-for-sync t)))
       ;; Check if we need to do OAuth2
       (when (org-caldav-use-oauth2)
 	;; We need to do oauth2. Check if it is available.
@@ -2475,14 +2465,7 @@ Returns MD5 from entry."
                             .rrule-props)))
           (when .completed-d
             (org-add-planning-info 'closed (org-caldav-convert-to-org-time .completed-d .completed-t)))
-          (when .uid
-            (let ((id (url-unhex-string .uid)))
-              (org-set-property "ID" id)
-              ;; Register the UID in `org-id-locations' so subsequent
-              ;; `org-id-find' calls don't trigger a full rescan of
-              ;; `org-agenda-files' as their cache-miss fallback.
-              (org-id-add-location
-               id (buffer-file-name (buffer-base-buffer)))))
+          (when .uid (org-set-property "ID" (url-unhex-string .uid)))
           (org-caldav-insert-org-entry--wrapup .categories))
       (insert (make-string (or .level 1) ?*) " " .summary "\n")
       (let ((indent (if org-adapt-indentation "  " "")))
@@ -2504,13 +2487,7 @@ Returns MD5 from entry."
       (org-caldav--insert-description .description)
       (forward-line -1)
       (when .uid
-        (let ((id (url-unhex-string .uid)))
-          (org-set-property "ID" id)
-          ;; Register the UID in `org-id-locations' so subsequent
-          ;; `org-id-find' calls don't trigger a full rescan of
-          ;; `org-agenda-files' as their cache-miss fallback.
-          (org-id-add-location
-           id (buffer-file-name (buffer-base-buffer)))))
+        (org-set-property "ID" (url-unhex-string .uid)))
       (org-caldav-change-location .location)
       (when .attendee-data
         (let ((att .attendee-data))
