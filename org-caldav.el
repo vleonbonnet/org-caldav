@@ -1887,12 +1887,15 @@ which can only be synced to calendar. Ignoring." uid))
                                                .completed-d .completed-t)))))
 	      (when (eq org-caldav-sync-changes-to-org 'all)
 		;; Sync everything, so first remove the old one.
-		(let ((level (org-current-level)))
+		(let ((level (org-current-level))
+		      (exc-ts (org-caldav--build-exception-aware-timestamps
+			       eventdata-alist event-exceptions event-exdates)))
 		  (delete-region (org-entry-beginning-position)
 				 (org-entry-end-position))
 		  (org-caldav-insert-org-event-or-todo
 		   (append eventdata-alist `((uid . ,uid)
-                                             (level . ,level))))))
+                                             (level . ,level)
+                                             (exception-timestamps . ,exc-ts))))))
 	      (setq buf (current-buffer))
 	      (push (list org-caldav-calendar-id uid
 			  (org-caldav-event-status cur)
