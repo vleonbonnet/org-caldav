@@ -1267,3 +1267,82 @@ SCHEDULED: <2026-01-20 Tue>
 :PROPERTIES:
 :ID:\\s-+test-todo-tags
 :END:")))
+
+(ert-deftest org-caldav-15-test-count-one-does-not-repeat ()
+  (let ((rrule (icalendar--split-value "FREQ=DAILY;COUNT=1")))
+    (should (org-caldav--rrule-bounded-p rrule))
+    (should (equal
+             (org-caldav-create-time-range
+              "18 06 2026" "08:00" "18 06 2026" "08:30" "" rrule)
+             "<2026-06-18 Thu 08:00-08:30>"))
+    (should-not
+     (org-caldav--rrule-additional-instances
+      "18 06 2026" "08:00" "08:30" rrule))))
+
+(ert-deftest org-caldav-16-test-count-expands-exactly ()
+  (let ((rrule (icalendar--split-value "FREQ=DAILY;COUNT=3")))
+    (should (equal
+             (org-caldav--rrule-additional-instances
+              "18 06 2026" "08:00" "08:30" rrule)
+             '("<2026-06-19 Fri 08:00-08:30>"
+               "<2026-06-20 Sat 08:00-08:30>")))))
+
+(ert-deftest org-caldav-17-test-count-and-until-use-first-bound ()
+  (let ((rrule (icalendar--split-value
+                "FREQ=DAILY;COUNT=5;UNTIL=20200620T235959Z")))
+    (should (equal
+             (org-caldav--rrule-additional-instances
+              "18 06 2020" "08:00" "08:30" rrule)
+             '("<2020-06-19 Fri 08:00-08:30>"
+               "<2020-06-20 Sat 08:00-08:30>")))))
+
+(ert-deftest org-caldav-18-test-count-exceptions-remain-finite ()
+  (let* ((rrule (icalendar--split-value "FREQ=DAILY;COUNT=3"))
+         (master `((start-d . "18 06 2026")
+                   (start-t . "08:00")
+                   (end-t . "08:30")
+                   (rrule-props . ,rrule)))
+         (exception '((recurrence-id . "20260619T080000")
+                      (start-d . "19 06 2026")
+                      (start-t . "09:00")
+                      (end-t . "09:30"))))
+    (should (equal
+             (org-caldav--build-exception-aware-timestamps
+              master (list exception) nil)
+             '("<2026-06-18 Thu 08:00-08:30>"
+               "<2026-06-19 Fri 09:00-09:30>"
+               "<2026-06-20 Sat 08:00-08:30>")))))
+
+(ert-deftest org-caldav-19-test-count-exdate-consumes-slot ()
+  (let* ((rrule (icalendar--split-value "FREQ=DAILY;COUNT=3"))
+         (master `((start-d . "18 06 2026")
+                   (start-t . "08:00")
+                   (end-t . "08:30")
+                   (rrule-props . ,rrule))))
+    (should (equal
+             (org-caldav--build-exception-aware-timestamps
+              master nil '("20260619T080000"))
+             '("<2026-06-18 Thu 08:00-08:30>"
+               "<2026-06-20 Sat 08:00-08:30>")))))
+
+(ert-deftest org-caldav-20-test-count-one-import-has-one-timestamp ()
+  (with-temp-buffer
+    (org-mode)
+    (org-caldav-insert-org-event-or-todo
+     `((component-type . event)
+       (summary . "Count one")
+       (start-d . "18 06 2026")
+       (start-t . "08:00")
+       (end-d . "18 06 2026")
+       (end-t . "08:30")
+       (e-type . nil)
+       (rrule-props . ,(icalendar--split-value "FREQ=DAILY;COUNT=1"))
+       (rrule . "FREQ=DAILY;COUNT=1")
+       (description . "")
+       (uid . "count-one-test")
+       (location . nil)
+       (categories . nil)
+       (level . 1)))
+    (should (equal
+             (buffer-substring-no-properties (point-min) (point-max))
+             "* Count one\n:PROPERTIES:\n:ID:       count-one-test\n:END:\n\n<2026-06-18 Thu 08:00-08:30>\n"))))

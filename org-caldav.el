@@ -2494,8 +2494,9 @@ Returns MD5 from entry."
                                                 .end-d .end-t
                                                 .e-type .rrule-props)
                   "\n")
-          ;; For UNTIL-bounded recurring events, add remaining instances.
-          (when (and .rrule-props (assoc 'UNTIL .rrule-props))
+          ;; For bounded recurring events, add remaining instances.
+          (when (and .rrule-props
+                     (org-caldav--rrule-bounded-p .rrule-props))
             (dolist (ts (org-caldav--rrule-additional-instances
                          .start-d .start-t .end-t .rrule-props))
               (insert indent ts "\n")))))
@@ -2579,6 +2580,20 @@ Sets the block's TAGS, and return its md5."
                             cleantags)))
         (reverse cleantags))))
 
+(defun org-caldav--rrule-count (rrule-props)
+  "Return RRULE COUNT, or 0 when COUNT is present but malformed.
+The zero value prevents a malformed finite rule from becoming an
+unbounded Org repeater."
+  (when-let ((raw (cadr (assq 'COUNT rrule-props))))
+    (if (string-match-p "\\`[1-9][0-9]*\\'" raw)
+        (string-to-number raw)
+      0)))
+
+(defun org-caldav--rrule-bounded-p (rrule-props)
+  "Return non-nil when RRULE has a finite UNTIL or COUNT bound."
+  (or (assq 'UNTIL rrule-props)
+      (assq 'COUNT rrule-props)))
+
 (defun org-caldav-create-time-range (start-d start-t end-d end-t
                                              e-type &optional rrule-props)
   "Create an Org timestamp range from START-D/T, END-D/T."
@@ -2598,7 +2613,7 @@ Sets the block's TAGS, and return its md5."
       (backward-char 1)
       (when end-t
         (insert "-" end-t))
-      (when (and rrule-props (not (assoc 'UNTIL rrule-props)))
+      (when (and rrule-props (not (org-caldav--rrule-bounded-p rrule-props)))
         (insert (format " +%d%s"
                         (read (or (cadr (assoc 'INTERVAL rrule-props)) "1"))
                         (downcase (substring (cadr (assoc 'FREQ rrule-props)) 0 1))))))
@@ -2630,7 +2645,7 @@ DATE is given as european date \"DD MM YYYY\"."
      (if time
          (format-time-string "%Y-%m-%d %a %H:%M" internaltime)
        (format-time-string "%Y-%m-%d %a" internaltime))
-     (when (and rrule-props (not (assoc 'UNTIL rrule-props)))
+     (when (and rrule-props (not (org-caldav--rrule-bounded-p rrule-props)))
        (format " +%d%s" (read (or (cadr (assoc 'INTERVAL rrule-props)) "1"))
                (downcase (substring (cadr (assoc 'FREQ rrule-props)) 0 1)))))))
 
@@ -2656,11 +2671,14 @@ Handles formats like \"20260210T075959Z\" and \"20260210\"."
       (encode-time sec min hour day month year tz))))
 
 (defun org-caldav--rrule-additional-instances (start-d start-t end-t rrule-props)
-  "Compute additional instance timestamps for an RRULE with UNTIL.
+  "Compute additional instance timestamps for a bounded RRULE.
 Returns a list of Org timestamp strings for all instances after the first.
 START-D is European date \"DD MM YYYY\", START-T/END-T are \"HH:MM\" or nil.
-RRULE-PROPS is the parsed RRULE alist containing FREQ, INTERVAL, and UNTIL."
+RRULE-PROPS is the parsed RRULE alist containing FREQ, INTERVAL, and
+optionally UNTIL and COUNT.  COUNT includes the first instance."
   (let* ((until-str (cadr (assoc 'UNTIL rrule-props)))
+         (has-count (assq 'COUNT rrule-props))
+         (count (org-caldav--rrule-count rrule-props))
          (freq (cadr (assoc 'FREQ rrule-props)))
          (interval (string-to-number
                     (or (cadr (assoc 'INTERVAL rrule-props)) "1")))
@@ -2680,12 +2698,15 @@ RRULE-PROPS is the parsed RRULE alist containing FREQ, INTERVAL, and UNTIL."
                   ("WEEKLY" (make-decoded-time :day (* 7 interval)))
                   ("MONTHLY" (make-decoded-time :month interval))
                   ("YEARLY" (make-decoded-time :year interval))))
-         (result nil))
-    (when (and until-time delta)
-      ;; Advance past the first instance
+         (result nil)
+         ;; COUNT includes DTSTART, so the next timestamp is occurrence 2.
+         (occurrence 2))
+    (when (and delta (or until-time has-count))
       (setq cur-decoded (decoded-time-add cur-decoded delta))
-      ;; Collect remaining instances while within UNTIL bound
-      (while (not (time-less-p until-time (encode-time cur-decoded)))
+      (while (and
+              (or (not has-count) (<= occurrence count))
+              (or (null until-time)
+                  (not (time-less-p until-time (encode-time cur-decoded)))))
         (let* ((itime (encode-time cur-decoded))
                (date-str (if start-t
                              (format-time-string "%Y-%m-%d %a %H:%M" itime)
@@ -2694,6 +2715,7 @@ RRULE-PROPS is the parsed RRULE alist containing FREQ, INTERVAL, and UNTIL."
                         (when end-t (concat "-" end-t))
                         ">")
                 result))
+        (setq occurrence (1+ occurrence))
         (setq cur-decoded (decoded-time-add cur-decoded delta))))
     (nreverse result)))
 
@@ -2754,13 +2776,15 @@ exdates (meaning the caller should use normal repeater behavior).
 
 The strategy: expand individual timestamps from DTSTART up to the last
 exception/exdate date.  Exception dates use their modified time, exdate dates
-are skipped, regular dates use the master's time.  The final timestamp carries
-the repeater for all future instances."
+are skipped, regular dates use the master's time.  Unbounded series receive a
+final repeater; finite series receive only timestamps within their bounds."
   (let-alist master-alist
     (let* ((rrule-props .rrule-props)
            (freq (cadr (assoc 'FREQ rrule-props)))
            (interval (string-to-number
                       (or (cadr (assoc 'INTERVAL rrule-props)) "1")))
+           (has-count (assq 'COUNT rrule-props))
+           (count (org-caldav--rrule-count rrule-props))
            (byday (cadr (assoc 'BYDAY rrule-props))))
       (when (and (or exception-alists exdates) freq)
         ;; Build lookup tables for special dates.
@@ -2799,10 +2823,17 @@ the repeater for all future instances."
                                           (calendar-extract-month sdate)
                                           (calendar-extract-year sdate)))
                  (cur-decoded (decode-time start-time))
-                 (result nil))
+                 (result nil)
+                 ;; COUNT includes DTSTART.
+                 (occurrence 1))
             ;; Walk through instances up to and including the last special date.
-            (while (not (time-less-p last-special-time
-                                     (encode-time cur-decoded)))
+            (while (and
+                    (not (time-less-p last-special-time
+                                      (encode-time cur-decoded)))
+                    (or (not has-count) (<= occurrence count))
+                    (or (null until-time)
+                        (not (time-less-p until-time
+                                          (encode-time cur-decoded)))))
               (let* ((cur-time (encode-time cur-decoded))
                      (date-key (format-time-string "%Y-%m-%d" cur-time))
                      (special (gethash date-key special-dates))
@@ -2855,19 +2886,21 @@ the repeater for all future instances."
                                      ">")))
                     (push ts result)))))
               ;; Advance to next instance.
+              (setq occurrence (1+ occurrence))
               (setq cur-decoded
                     (org-caldav--rrule-next-instance cur-decoded
                                                      freq interval byday)))
             ;; Final timestamp: next regular instance after all specials.
-            ;; Only add a repeater if the RRULE has no UNTIL bound;
+            ;; Only add a repeater if the RRULE has no finite bound;
             ;; otherwise the expanded timestamps already cover everything.
             (let* ((itime (encode-time cur-decoded)))
-              ;; Skip if UNTIL is set and we've gone past it.
-              (unless (and until-time (time-less-p until-time itime))
+              ;; Skip if either finite bound has been reached.
+              (unless (or (and has-count (> occurrence count))
+                          (and until-time (time-less-p until-time itime)))
                 (let* ((ts-date (if .start-t
                                     (format-time-string "%Y-%m-%d %a %H:%M" itime)
                                   (format-time-string "%Y-%m-%d %a" itime)))
-                       (repeater (unless until-time
+                       (repeater (unless (org-caldav--rrule-bounded-p rrule-props)
                                    (format " +%d%s" interval
                                            (downcase (substring freq 0 1)))))
                        (ts (concat "<" ts-date
