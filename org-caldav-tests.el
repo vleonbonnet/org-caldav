@@ -551,6 +551,37 @@ Org task 2
 				    "\\s-*The description\n")
 			    (write-entry "1" nil))))))
 
+(ert-deftest org-caldav-03a-blank-line-before-timestamp ()
+  "Keep a blank line between entry metadata and its timestamp."
+  (let ((entry '((start-d . "01 01 2015")
+                 (start-t . "19:00")
+                 (end-d . "01 01 2015")
+                 (end-t . "20:00")
+                 (summary . "The summary")
+                 (description . "")
+                 (location . "location")))
+        (org-caldav-select-tags ""))
+    (with-temp-buffer
+      (org-mode)
+      (org-caldav-insert-org-event-or-todo
+       (append entry '((uid . "1") (level . 1))))
+      (should (string-match-p
+               ":END:\n\n<2015-01-01 Thu 19:00-20:00>\n"
+               (buffer-string)))))
+  (with-temp-buffer
+    (org-mode)
+    (insert "* The summary\n"
+            ":PROPERTIES:\n"
+            ":ID:       1\n"
+            ":END:\n"
+            "<2015-01-01 Thu 19:00-20:00>\n")
+    (goto-char (point-min))
+    (org-caldav--replace-bare-timestamps
+     "" '("<2015-01-02 Fri 19:00-20:00>"))
+    (should (string-match-p
+             ":END:\n\n<2015-01-02 Fri 19:00-20:00>\n"
+             (buffer-string)))))
+
 (ert-deftest org-caldav-04-multiple-calendars ()
   (org-caldav-test-setup-temp-files)
   (with-current-buffer (find-file-noselect org-caldav-test-orgfile)

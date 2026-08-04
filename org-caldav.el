@@ -2436,6 +2436,18 @@ Returns nil for unknown values."
     (when org-caldav-description-blank-line-after (newline))
     (newline)))
 
+(defun org-caldav--ensure-blank-line-before-timestamp ()
+  "Ensure a blank line precedes the entry's first bare timestamp.
+Only modify entries whose first body element is an active timestamp."
+  (save-excursion
+    (org-back-to-heading)
+    (org-end-of-meta-data t)
+    (when (looking-at (concat "^[ \t]*" org-tsr-regexp "[ \t]*$"))
+      (unless (save-excursion
+                (forward-line -1)
+                (looking-at-p "^[ \t]*$"))
+        (insert "\n")))))
+
 (defun org-caldav-insert-org-event-or-todo (eventdata-alist)
   "Insert org block from given event data at current position.
 Returns MD5 from entry."
@@ -2523,6 +2535,7 @@ To be removed when org dependency reaches >=9.2."
   "Helper function to finish inserting an org entry or todo.
 Sets the block's TAGS, and return its md5."
   (org-back-to-heading)
+  (org-caldav--ensure-blank-line-before-timestamp)
   (org-caldav--org-set-tags-to (seq-union tags org-caldav-select-tags))
   (md5 (buffer-substring-no-properties
 	(org-entry-beginning-position)
@@ -2888,7 +2901,8 @@ caller's intent is to fully replace the block."
       (forward-line 1))
     (delete-region block-start (point)))
   (dolist (ts timestamps)
-    (insert indent ts "\n")))
+    (insert indent ts "\n"))
+  (org-caldav--ensure-blank-line-before-timestamp))
 
 (defun org-caldav--subseries-base-uid (uid)
   "Extract the base UID from a Google Calendar sub-series UID.
