@@ -2950,6 +2950,7 @@ Google creates sub-series VEVENTs with UIDs like
   "Save org-caldav sync database to disk.
 See also `org-caldav-save-directory'."
   (with-temp-buffer
+    (insert ";;; -*- lexical-binding: t; -*-\n")
     (insert ";; This is the sync state from org-caldav\n;; calendar-id: "
 	    org-caldav-calendar-id "\n;; Do not modify this file.\n\n")
     (insert "(setq org-caldav-event-list\n'")
