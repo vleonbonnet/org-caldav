@@ -38,6 +38,8 @@
 (require 'ox-icalendar)
 (require 'org-id)
 (require 'icalendar)
+(require 'org-caldav-ical)
+(defvar org-link-search-inhibit-query)
 (require 'url-util)
 (require 'cl-lib)
 (require 'button)
@@ -55,7 +57,7 @@
   "Base URL for CalDAV access.
 By default, `org-caldav-calendar-id' will be appended to this to
 get an URL for calendar events.  If this default is not correct,
-use '%s' to where the calendar id must be placed.
+use `%s' to where the calendar id must be placed.
 
 Set this to symbol \\='google to use Google Calendar, using OAuth2
 authentication.  In that case, also make sure that
@@ -132,9 +134,9 @@ datetree is more useful for light organization of the org-file,
 rather than as a precise reflection of your calendar. Therefore
 the default value is at the coarsest level of month-tree."
   :type '(choice
-          (const month :tag "Month-tree")
-          (const week :tag "Week-Day-tree")
-          (const day :tag "Month-Day-tree")))
+          (const :tag "Month-tree" month)
+          (const :tag "Week-Day-tree" week)
+          (const :tag "Month-Day-tree" day)))
 
 (defcustom org-caldav-sync-direction 'twoway
   "Which kind of sync should be done between Org and calendar.
@@ -146,9 +148,9 @@ Org. Other options are:
   `org->cal': Only sync Org to calendar
   `cal->org': Only sync calendar to Org"
   :type '(choice
-          (const twoway :tag "Two-way sync")
-          (const org->cal :tag "Only sync org to calendar")
-          (const cal->org :tag "Only sync calendar to Org")))
+          (const :tag "Two-way sync" twoway)
+          (const :tag "Only sync org to calendar" org->cal)
+          (const :tag "Only sync calendar to Org" cal->org)))
 
 
 (defcustom org-caldav-calendars nil
@@ -179,7 +181,8 @@ Example:
 (defcustom org-caldav-sync-changes-to-org 'title-and-timestamp
   "What kind of changes should be synced from Calendar to Org.
 Can be one of the following symbols:
-  title-and-timestamp: Sync title line (including tags) and timestamp (default).
+  title-and-timestamp: Sync title line (including tags) and timestamp
+  (default).
   title-only: Sync only the title line (including tags).
   timestamp-only: Sync only the timestamp.
   all: Sync everything.
@@ -189,10 +192,10 @@ iCalendar format is pretty limited in what it can store, so you
 might loose information in your Org items (take a look at
 `org-icalendar-include-body')."
   :type '(choice
-          (const title-and-timestamp :tag "Sync title and timestamp")
-          (const title-only :tag "Sync only the title")
-          (const timestamp-only :tag "Sync only the timestamp")
-          (const all :tag "Sync everything")))
+          (const :tag "Sync title and timestamp" title-and-timestamp)
+          (const :tag "Sync only the title" title-only)
+          (const :tag "Sync only the timestamp" timestamp-only)
+          (const :tag "Sync everything" all)))
 
 (defcustom org-caldav-days-in-past nil
   "Number of days before today to skip in the exported calendar.
@@ -210,9 +213,9 @@ ask = Ask for before deletion (default)
 never = Never delete Org entries
 always = Always delete"
   :type '(choice
-          (const ask :tag "Ask before deletion")
-          (const never :tag "Never delete Org entries")
-          (const always :tag "Always delete")))
+          (const :tag "Ask before deletion" ask)
+          (const :tag "Never delete Org entries" never)
+          (const :tag "Always delete" always)))
 
 (defcustom org-caldav-delete-calendar-entries 'ask
   "Whether entries deleted in Org may be deleted in calendar.
@@ -222,9 +225,9 @@ always = Always delete without asking (default)
 ask = Ask for before deletion
 never = Never delete calendar entries"
   :type '(choice
-          (const ask :tag "Ask before deletion")
-          (const never :tag "Never delete calendar entries")
-          (const always :tag "Always delete without asking")))
+          (const :tag "Ask before deletion" ask)
+          (const :tag "Never delete calendar entries" never)
+          (const :tag "Always delete without asking" always)))
 
 (defcustom org-caldav-skip-conditions nil
   "Conditions for skipping entries during icalendar export.
@@ -232,7 +235,7 @@ This must be a list of conditions, which are described in the
 doc-string of `org-agenda-skip-if'.  Any entry that matches will
 not be exported.  Note that the normal `org-agenda-skip-function'
 has no effect on the icalendar exporter."
-  :type 'list)
+  :type '(repeat sexp))
 
 (defcustom org-caldav-backup-file
   (expand-file-name "org-caldav-backup.org" user-emacs-directory)
@@ -249,8 +252,8 @@ future syncs."
 If this is the symbol `with-headings', the results will also
 include headings from Org entries."
   :type '(choice
-          (const with-headings :tag "Show what was done after syncing including headings")
-          (const nil :tag "Don't show what was done after syncing")))
+          (const :tag "Show what was done after syncing including headings" with-headings)
+          (const :tag "Don't show what was done after syncing" nil)))
 
 (defcustom org-caldav-retry-attempts 5
   "Number of times trying to retrieve/put events."
@@ -288,7 +291,7 @@ The default mapping is: 0 is no priority, 1-4 is #A, 5-8 is #B,
 and 9 is #C.
 
 TODO: Store the priority in a property and sync it."
-  :type 'list)
+  :type '(repeat sexp))
 
 (defcustom org-caldav-todo-percent-states '((0 "TODO") (100 "DONE"))
   "Mapping between `org-todo-keywords' & iCal VTODO's percent-complete.
@@ -307,7 +310,7 @@ The following example would instead map 0 to TODO, 1 to NEXT,
 Note: You should check that the keywords in
 `org-caldav-todo-percent-states' are also valid keywords in
 `org-todo-keywords'."
-  :type 'list)
+  :type '(repeat sexp))
 
 (defcustom org-caldav-todo-deadline-schedule-warning-days nil
   "Whether to auto-create SCHEDULED timestamp from DEADLINE.
@@ -344,9 +347,9 @@ ask = Ask for before resuming (default)
 never = Never resume
 always = Always resume"
   :type '(choice
-          (const ask :tag "Ask before resuming")
-          (const never :tag "Never resume")
-          (const always :tag "Always resume")))
+          (const :tag "Ask before resuming" ask)
+          (const :tag "Never resume" never)
+          (const :tag "Always resume" always)))
 
 (defcustom org-caldav-oauth2-providers
   '((google "https://accounts.google.com/o/oauth2/v2/auth"
@@ -358,10 +361,10 @@ always = Always resume"
     IDENTIFIER AUTH-URL TOKEN-URL RESOURCE-URL CALENDAR-URL
 
 where IDENTIFIER is a symbol that can be set in `org-caldav-url'
-and '%s' in the CALENDAR-URL denotes where
+and `%s' in the CALENDAR-URL denotes where
 `org-caldav-calendar-id' must be placed to generate a valid
 events URL for a calendar."
-  :type 'list)
+  :type '(repeat sexp))
 
 (defcustom org-caldav-oauth2-client-id nil
   "Client ID for OAuth2 authentication."
@@ -2210,7 +2213,7 @@ match org-caldav-skip-conditions."
 (defun org-caldav-generate-ics ()
   "Generate ICS file from `org-caldav-files'.
 Returns buffer containing the ICS file."
-  (let ((icalendar-file
+  (let ((_icalendar-file
 	 (if (featurep 'ox-icalendar)
 	     'org-icalendar-combined-agenda-file
 	   'org-combined-agenda-icalendar-file))
@@ -2328,7 +2331,7 @@ Returns nil if there are no more events."
 
 (defun org-caldav-rewrite-uid-in-event ()
   "Rewrite UID in current buffer.
-This will strip prefixes like 'DL' or 'TS' the Org exporter puts
+This will strip prefixes like `DL' or `TS' the Org exporter puts
 in the UID and also remove whitespaces. Throws an error if there
 is no UID to rewrite. Returns the UID."
   (save-excursion
@@ -2378,7 +2381,7 @@ Returns a plist with keys :organizer, :req-participants,
          (attendee-props (seq-filter
                           (lambda (p) (eq (car p) 'ATTENDEE))
                           props))
-         (organizer-raw (or (icalendar--get-event-property e 'ORGANIZER) ""))
+         (organizer-raw (or (org-caldav-ical-property e 'ORGANIZER) ""))
          (organizer (replace-regexp-in-string
                      "^[Mm][Aa][Ii][Ll][Tt][Oo]:" ""
                      organizer-raw))
@@ -3098,33 +3101,35 @@ If PROPERTY in event E contains has valuetype \"DATE\" instead of
 \"DATE-TIME\", return DEFAULT instead."
   (if (and datetime
              (not (string= 
-                   (cadr (icalendar--get-event-property-attributes
-                          e property))
+                   (plist-get (or (org-caldav-ical-attributes e property)
+                                  (and (eq property 'DTEND)
+                                       (org-caldav-ical-attributes e 'DTSTART)))
+                              'VALUE)
                    "DATE")))
-      (icalendar--datetime-to-colontime datetime)
+      (org-caldav-ical-time datetime)
     default))
 
 (defun org-caldav--event-date-plist (e property zone-map)
   "Helper function for `org-caldav-convert-event-or-todo--from-buffer'.
 Extracts datetime-related attributes from PROPERTY of event E and
 puts them in a plist."
-  (let* ((dt-prop (icalendar--get-event-property e property))
-	 (dt-zone (icalendar--find-time-zone
-		   (icalendar--get-event-property-attributes
+  (let* ((dt-prop (org-caldav-ical-property e property))
+	 (dt-zone (org-caldav-ical-zone
+		   (org-caldav-ical-attributes
 		    e property)
 		   zone-map))
-	 (dt-dec (icalendar--decode-isodatetime dt-prop nil dt-zone)))
+	 (dt-dec (org-caldav-ical-decode dt-prop nil dt-zone)))
     (list 'event-property dt-prop
           'zone dt-zone
           'decoded dt-dec
-          'date (icalendar--datetime-to-diary-date dt-dec)
+          'date (org-caldav-ical-date dt-dec)
           'time (org-caldav--datetime-to-colontime dt-dec e property))))
 
 (defun org-caldav--icalendar--all-todos (icalendar)
   "Return the list of all existing todos in the given ICALENDAR."
   (let ((result '()))
     (mapc (lambda (elt)
-            (setq result (append (icalendar--get-children elt 'VTODO)
+            (setq result (append (org-caldav-ical-children elt 'VTODO)
                            result)))
       (nreverse icalendar))
     result))
@@ -3145,15 +3150,15 @@ When there are no exceptions or exdates those keys are nil."
     (insert decoded))
   (goto-char (point-min))
   (let* ((calendar-date-style 'european)
-	 (ical-list (icalendar--read-element nil nil))
-	 (zone-map (icalendar--convert-all-timezones ical-list))
+	 (ical-list (org-caldav-ical-read))
+	 (zone-map (org-caldav-ical-timezones ical-list))
          (all-elements (if is-todo
                            (org-caldav--icalendar--all-todos ical-list)
-                         (icalendar--all-events ical-list)))
+                         (org-caldav-ical-events ical-list)))
          master-element exceptions-elements exdates)
     ;; Classify VEVENTs: master (no RECURRENCE-ID) vs exception.
     (dolist (e all-elements)
-      (if (icalendar--get-event-property e 'RECURRENCE-ID)
+      (if (org-caldav-ical-property e 'RECURRENCE-ID)
           (push e exceptions-elements)
         (setq master-element e)))
     ;; Fall back to first element if no master found.
@@ -3161,7 +3166,7 @@ When there are no exceptions or exdates those keys are nil."
       (setq master-element (car all-elements)))
     ;; Extract EXDATE from master (may be comma-separated or multiple props).
     (when master-element
-      (let ((exdate-str (icalendar--get-event-property master-element 'EXDATE)))
+      (let ((exdate-str (org-caldav-ical-property master-element 'EXDATE)))
         (when exdate-str
           (setq exdates (split-string exdate-str "," t "[ \t]+")))))
     (let ((master-alist
@@ -3173,7 +3178,7 @@ When there are no exceptions or exdates those keys are nil."
                      (let ((alist (org-caldav-convert-event-or-todo--from-element
                                    is-todo zone-map e))
                            (recurrence-id
-                            (icalendar--get-event-property e 'RECURRENCE-ID)))
+                            (org-caldav-ical-property e 'RECURRENCE-ID)))
                        (append alist `((recurrence-id . ,recurrence-id)))))
                    (nreverse exceptions-elements))))
       (list :master master-alist
@@ -3190,18 +3195,18 @@ which can be fed into `org-caldav-insert-org-event-or-todo'."
             (start-t . ,(plist-get dtstart-plist 'time))
             (dtstart-dec . ,(plist-get dtstart-plist 'decoded))
             (summary . ,(icalendar--convert-string-for-import
-		         (or (icalendar--get-event-property e 'SUMMARY)
+		         (or (org-caldav-ical-property e 'SUMMARY)
 		             "No Title")))
             (description . ,(icalendar--convert-string-for-import
-		             (or (icalendar--get-event-property e 'DESCRIPTION)
+		             (or (org-caldav-ical-property e 'DESCRIPTION)
 			         "")))
-            (rrule-props . ,(icalendar--split-value
-                             (icalendar--get-event-property e 'RRULE)))
-            (rrule . ,(or (icalendar--get-event-property e 'RRULE) ""))
+            (rrule-props . ,(org-caldav-ical-split-rule
+                             (org-caldav-ical-property e 'RRULE)))
+            (rrule . ,(or (org-caldav-ical-property e 'RRULE) ""))
             (attendee-data . ,(org-caldav--extract-attendees e))
             (categories . ,(org-caldav--tags-str-to-list
                             (icalendar--convert-string-for-import
-                             (or (icalendar--get-event-property e 'CATEGORIES)
+                             (or (org-caldav-ical-property e 'CATEGORIES)
                                  "")))))))
     (if is-todo
         (org-caldav-convert-event-or-todo--todo e zone-map eventdata-alist)
@@ -3215,21 +3220,21 @@ which can be fed into `org-caldav-insert-org-event-or-todo'."
          (summary (cdr (assq 'summary eventdata-alist)))
          (dtend-plist (org-caldav--event-date-plist e 'DTEND zone-map))
 	 (dtend-dec (plist-get dtend-plist 'decoded))
-	 (dtend-1-dec (icalendar--decode-isodatetime
+	 (dtend-1-dec (org-caldav-ical-decode
 		       (plist-get dtend-plist 'event-property) -1
 		       (plist-get dtend-plist 'zone)))
 	 e-type
-	 (duration (icalendar--get-event-property e 'DURATION)))
+	 (duration (org-caldav-ical-property e 'DURATION)))
     (when (string-match "^\\(?:\\(DL\\|S\\):\s+\\)?\\(.*\\)$" summary)
       (setq e-type (match-string 1 summary))
       (setq summary (match-string 2 summary)))
     (when duration
-      (let ((dtend-dec-d (icalendar--add-decoded-times
+      (let ((dtend-dec-d (org-caldav-ical-add
 			  dtstart-dec
-			  (icalendar--decode-isoduration duration)))
-	    (dtend-1-dec-d (icalendar--add-decoded-times
+			  (org-caldav-ical-duration duration)))
+	    (dtend-1-dec-d (org-caldav-ical-add
 			    dtstart-dec
-			    (icalendar--decode-isoduration duration
+			    (org-caldav-ical-duration duration
 							   t))))
 	(if (and dtend-dec (not (eq dtend-dec dtend-dec-d)))
 	    (message "Inconsistent endtime and duration for %s"
@@ -3243,15 +3248,15 @@ which can be fed into `org-caldav-insert-org-event-or-todo'."
 		(end-d
 		 . ,(if end-t
 			(if dtend-dec
-			    (icalendar--datetime-to-diary-date dtend-dec)
+			    (org-caldav-ical-date dtend-dec)
 			  start-d)
 		      (if dtend-1-dec
-			  (icalendar--datetime-to-diary-date dtend-1-dec)
+			  (org-caldav-ical-date dtend-1-dec)
 			start-d)))
 		(end-t . ,end-t)
 		(location
 		 . ,(icalendar--convert-string-for-import
-		     (or (icalendar--get-event-property e 'LOCATION) "")))
+		     (or (org-caldav-ical-property e 'LOCATION) "")))
 		(e-type . ,e-type))
 	      eventdata-alist))))
 
@@ -3260,8 +3265,8 @@ which can be fed into `org-caldav-insert-org-event-or-todo'."
   (let* ((dtdue-plist (org-caldav--event-date-plist e 'DUE zone-map))
 	 (dtcomplete-plist (org-caldav--event-date-plist
 			    e 'COMPLETED zone-map))
-         (percent-complete (icalendar--get-event-property e 'PERCENT-COMPLETE))
-         (stat (icalendar--get-event-property e 'STATUS)))
+         (percent-complete (org-caldav-ical-property e 'PERCENT-COMPLETE))
+         (stat (org-caldav-ical-property e 'STATUS)))
     (unless percent-complete
       (setq percent-complete
         (cond
@@ -3272,7 +3277,7 @@ which can be fed into `org-caldav-insert-org-event-or-todo'."
     (append `((component-type . todo)
 	      (due-d . ,(plist-get dtdue-plist 'date))
 	      (due-t . ,(plist-get dtdue-plist 'time))
-	      (priority . ,(icalendar--get-event-property e 'PRIORITY))
+	      (priority . ,(org-caldav-ical-property e 'PRIORITY))
               (percent-complete ., percent-complete)
 	      (status . ,stat)
 	      (completed-d . ,(plist-get dtcomplete-plist 'date))
@@ -3325,15 +3330,15 @@ If IMPORT-TODOS, imports vtodos only. Else imports vevents only.
 Currently, this function only adds entries, and does not
 overwrite existing entries in INBOX, even if the event has an
 existing ID.  This behavior may change in future."
-  (with-current-buffer (icalendar--get-unfolded-buffer (current-buffer))
+  (with-current-buffer (org-caldav-ical-unfolded-buffer (current-buffer))
     (goto-char (point-min))
     (if (save-excursion (re-search-forward "^BEGIN:VCALENDAR\\s-*$" nil t))
         (let* ((calendar-date-style 'european)
-               (ical-list (icalendar--read-element nil nil))
+               (ical-list (org-caldav-ical-read))
                (event-list (if import-todos
                                (org-caldav--icalendar--all-todos ical-list)
-                             (icalendar--all-events ical-list)))
-               (zone-map (icalendar--convert-all-timezones ical-list))
+                             (org-caldav-ical-events ical-list)))
+               (zone-map (org-caldav-ical-timezones ical-list))
                (nevents (length event-list))
                event)
           (with-current-buffer (find-file-noselect
