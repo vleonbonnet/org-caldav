@@ -2584,7 +2584,7 @@ Sets the block's TAGS, and return its md5."
   "Return RRULE COUNT, or 0 when COUNT is present but malformed.
 The zero value prevents a malformed finite rule from becoming an
 unbounded Org repeater."
-  (when-let ((raw (cadr (assq 'COUNT rrule-props))))
+  (when-let* ((raw (cadr (assq 'COUNT rrule-props))))
     (if (string-match-p "\\`[1-9][0-9]*\\'" raw)
         (string-to-number raw)
       0)))
