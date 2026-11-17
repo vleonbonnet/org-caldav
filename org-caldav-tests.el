@@ -1,4 +1,4 @@
-;; Test suite for org-caldav.el
+;; Test suite for org-caldav.el  -*- lexical-binding: t; -*-
 ;; Copyright, authorship, license: see org-caldav.el.
 
 ;; Run it from the org-caldav directory like this:
@@ -581,6 +581,33 @@ Org task 2
     (should (string-match-p
              ":END:\n\n<2015-01-02 Fri 19:00-20:00>\n"
              (buffer-string)))))
+
+(ert-deftest org-caldav-03b-insert-org-entry-asterisk-description ()
+  "Description lines starting with asterisks must not become headings."
+  (let ((entry '((start-d . "01 01 2015")
+                 (start-t . "19:00")
+                 (end-d . "01 01 2015")
+                 (end-t . "20:00")
+                 (summary . "The summary")
+                 (description . "Agenda:\n* First item\n** Second item\nDone.")
+                 (location . "location")))
+        (org-caldav-select-tags ""))
+    (dolist (org-caldav-description-heading-escape '(zero-width-space space))
+      (with-temp-buffer
+        (org-mode)
+        (org-caldav-insert-org-event-or-todo
+         (append entry '((uid . "1") (level . nil))))
+        ;; Only the event heading itself may be a heading.
+        (should (= 1 (length (org-map-entries t nil nil))))
+        (should (string-match "* First item" (buffer-string)))
+        (should (string-match "** Second item" (buffer-string)))))
+    ;; Stripping the zero width spaces from an exported ICS buffer
+    ;; restores the original asterisk lines.
+    (with-temp-buffer
+      (insert "DESCRIPTION:Agenda:\n\u200B* First item\n\u200B** Second item\n")
+      (org-caldav--strip-zero-width-spaces)
+      (should (equal (buffer-string)
+                     "DESCRIPTION:Agenda:\n* First item\n** Second item\n")))))
 
 (ert-deftest org-caldav-04-multiple-calendars ()
   (org-caldav-test-setup-temp-files)

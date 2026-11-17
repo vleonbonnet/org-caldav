@@ -386,6 +386,13 @@ have trouble finding IDs in unsaved buffers, causing syncs and
 the unit tests to fail otherwise."
   :type 'boolean)
 
+(defcustom org-caldav-description-heading-escape 'zero-width-space
+  "How to escape leading asterisks in imported descriptions.
+`zero-width-space' uses U+200B, removed on export.
+`space' uses visible indentation but may change bullets on export."
+  :type '(choice (const :tag "Zero width space (U+200B)" zero-width-space)
+                 (const :tag "Space" space)))
+
 (defcustom org-caldav-description-blank-line-before t
   "Whether DESCRIPTION inserted into org should be preceded by blank line."
   :type 'boolean)
@@ -2279,6 +2286,7 @@ Returns buffer containing the ICS file."
 	      (with-current-buffer (get-buffer-create " *org-caldav-ics*")
 		(erase-buffer)
 		(insert ics-string)
+		(org-caldav--strip-zero-width-spaces)
 		(current-buffer)))
 	  (org-release-buffers org-agenda-new-buffers))))))
 
@@ -2435,7 +2443,18 @@ Returns nil for unknown values."
     (when org-caldav-description-blank-line-before (newline))
     (let ((beg (point)))
       (insert description)
-      (org-indent-region beg (point)))
+      (org-indent-region beg (point))
+      ;; Escape any remaining lines starting with asterisks (whatever
+      ;; their level), so the description cannot break the heading
+      ;; structure of the inbox (see issue #323).  This must happen
+      ;; after `org-indent-region', which would re-indent
+      ;; space-escaped lines back to column 0.
+      (let ((end (point-marker))
+            (esc (org-caldav--description-escape-string)))
+        (save-excursion
+          (goto-char beg)
+          (while (re-search-forward "^\\*" end t)
+            (replace-match (concat esc "*") t t)))))
     (when org-caldav-description-blank-line-after (newline))
     (newline)))
 
@@ -2450,6 +2469,21 @@ Only modify entries whose first body element is an active timestamp."
                 (forward-line -1)
                 (looking-at-p "^[ \t]*$"))
         (insert "\n")))))
+
+(defun org-caldav--description-escape-string ()
+  "Return the escape string according to `org-caldav-description-heading-escape'."
+  (if (eq org-caldav-description-heading-escape 'space) " " "\u200B"))
+
+(defun org-caldav--strip-zero-width-spaces ()
+  "Remove zero-width-spaces (U+200B) escaping asterisks on new lines.
+Inverse of the escaping done by `org-caldav--insert-description':
+zero-width-space escaped asterisk lines survive the icalendar export
+literally, so stripping the escape character from the exported ICS
+restores the original description on the calendar server."
+  (save-excursion
+    (goto-char (point-min))
+    (while (re-search-forward (rx bol ?\u200b ?*) nil t)
+      (replace-match "*" t t))))
 
 (defun org-caldav-insert-org-event-or-todo (eventdata-alist)
   "Insert org block from given event data at current position.
