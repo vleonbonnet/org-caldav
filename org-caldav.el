@@ -1528,18 +1528,18 @@ which can only be synced to calendar. Ignoring." uid))
                   (org-caldav--org-set-tags-to .categories))
                   ;; Sync location
 		  (org-caldav-change-location .location)
-                (if (not is-todo)
-                  ;; Sync priority
-                  (let* ((nprio (string-to-number (or .priority "0")))
-                         (r nil)
-                         (vprio (dolist (p org-caldav-todo-priority r)
-                                  (when (>= nprio (car p))
-                                    (setq r (car (cdr p)))))))
-                    (when vprio
-                      (org-priority (string-to-char vprio))))
-                  ;; Sync todo status
-                  (org-todo (org-caldav--todo-percent-to-state
-                             (string-to-number .percent-complete)))))
+                  (when is-todo
+                    ;; Sync priority
+                    (let* ((nprio (string-to-number (or .priority "0")))
+                           (r nil)
+                           (vprio (dolist (p org-caldav-todo-priority r)
+                                    (when (>= nprio (car p))
+                                      (setq r (car (cdr p)))))))
+                      (when vprio
+                        (org-priority (string-to-char vprio))))
+                    ;; Sync todo status
+                    (org-todo (org-caldav--todo-percent-to-state
+                               (string-to-number .percent-complete)))))
 	      (when (or (eq org-caldav-sync-changes-to-org 'timestamp-only)
 			(eq org-caldav-sync-changes-to-org 'title-and-timestamp))
                 (if (not is-todo)
